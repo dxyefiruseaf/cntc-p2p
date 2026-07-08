@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@vitejs/plugin-legacy": "latest",
-    "vite": "latest"
+    "vite": "latest",
+    "@supabase/supabase-js": "latest"
   },
   "devDependencies": {}
 }

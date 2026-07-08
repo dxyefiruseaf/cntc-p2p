@@ -34,4 +34,7 @@ jobs:
           SYNC_P2P_FROM_BINANCE: ${{ vars.SYNC_P2P_FROM_BINANCE || 'true' }}
           SYNC_P2P_PUBLIC_FALLBACK: ${{ vars.SYNC_P2P_PUBLIC_FALLBACK || 'true' }}
           FALLBACK_USD_VND_RATE: ${{ vars.FALLBACK_USD_VND_RATE || '26000' }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ALERT_FROM_EMAIL: ${{ vars.ALERT_FROM_EMAIL || 'BTC BigData Alert <onboarding@resend.dev>' }}
+          ALERT_COOLDOWN_HOURS: ${{ vars.ALERT_COOLDOWN_HOURS || '6' }}
         run: python scripts/sync_market_data.py

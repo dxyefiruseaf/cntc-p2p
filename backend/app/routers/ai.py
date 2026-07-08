@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
 from app.data_loader import load_mock_data
-from app.repositories.market_repository import get_ai_history, get_latest_ohlcv, get_p2p_spread, insert_ai_history
+from app.auth import get_optional_user
+from app.repositories.market_repository import get_ai_history, get_ai_history_for_user, get_latest_ohlcv, get_p2p_spread, insert_ai_history_safe
 from app.schemas import AskAIRequest, AskAIResponse
 from app.services.ai_service import (
     DISCLAIMER,
@@ -46,13 +47,17 @@ async def _market_context():
 
 
 @router.post("/ask", response_model=AskAIResponse)
-async def ask_ai(payload: AskAIRequest):
+async def ask_ai(payload: AskAIRequest, request: Request):
     latest, summary, p2p = await _market_context()
     rule = score_market(latest, summary)
 
     system_prompt = build_system_prompt()
     prompt = build_market_prompt(payload.question, latest, summary, p2p, rule, payload.risk_profile)
-    answer = await call_ai_provider(prompt, system_prompt)
+    try:
+        answer = await call_ai_provider(prompt, system_prompt)
+    except Exception as exc:
+        answer = None
+        print(f"AI provider lỗi, fallback rule-based: {exc}")
     if not answer:
         answer = fallback_answer(payload.question, rule, latest, p2p)
 
@@ -70,7 +75,8 @@ async def ask_ai(payload: AskAIRequest):
         "created_at": created_at,
     }
 
-    insert_ai_history(
+    user = get_optional_user(request)
+    insert_ai_history_safe(
         {
             "question": payload.question,
             "answer": answer,
@@ -80,6 +86,7 @@ async def ask_ai(payload: AskAIRequest):
             "risks": risks,
             "market_snapshot": {"latest": latest, "summary": summary, "p2p_latest": p2p.get("latest")},
             "model_name": "backend-ai-advisor",
+            "user_id": user["id"] if user else None,
             "created_at": created_at,
         }
     )
@@ -87,10 +94,11 @@ async def ask_ai(payload: AskAIRequest):
 
 
 @router.get("/history")
-async def ai_history(limit: int = Query(24, ge=1, le=200)):
-    rows = get_ai_history(limit)
+async def ai_history(request: Request, limit: int = Query(24, ge=1, le=200)):
+    user = get_optional_user(request)
+    rows = get_ai_history_for_user(user["id"], limit) if user else get_ai_history(limit)
     if rows:
-        return {"count": len(rows), "data": rows}
+        return {"count": len(rows), "data": rows, "scope": "user" if user else "public"}
 
     public = await fetch_public_api(f"/api/ai/history?limit={limit}")
     if public:

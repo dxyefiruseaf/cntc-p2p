@@ -443,6 +443,119 @@ def upsert_rows(table: str, rows: list[dict[str, Any]], on_conflict: str) -> int
     return total
 
 
+
+# ---------------------------------------------------------------------------
+# Alert checks (runs after data sync, intended for GitHub Actions hourly job)
+# ---------------------------------------------------------------------------
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).replace(" ", "T")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _metric_value(rule: dict[str, Any], latest: dict[str, Any] | None, p2p_rows: list[dict[str, Any]]) -> float | None:
+    metric = rule.get("metric")
+    if metric == "price" and latest:
+        return clean_number(latest.get("close"))
+    if metric == "rsi" and latest:
+        return clean_number(latest.get("rsi_14"))
+    if metric in {"p2p_spread_sell", "p2p_spread_buy"}:
+        trade_type = "SELL" if metric.endswith("sell") else "BUY"
+        row = next((r for r in p2p_rows if r.get("trade_type") == trade_type), None)
+        return clean_number(row.get("spread_pct")) if row else None
+    return None
+
+
+def _condition_met(value: float, operator: str, threshold: float) -> bool:
+    return value > threshold if operator == "gt" else value < threshold
+
+
+def _get_user_email(sb, user_id: str) -> str | None:
+    try:
+        res = sb.auth.admin.get_user_by_id(user_id)
+        user = getattr(res, "user", None) or res
+        return getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None)
+    except Exception as exc:
+        print(f"Không lấy được email user {user_id}: {exc}")
+        return None
+
+
+def _send_resend_email(to_email: str, subject: str, html_body: str) -> bool:
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
+        print("RESEND_API_KEY chưa cấu hình, bỏ qua gửi email.")
+        return False
+    from_email = os.getenv("ALERT_FROM_EMAIL", "BTC BigData Alert <onboarding@resend.dev>")
+    try:
+        res = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"from": from_email, "to": [to_email], "subject": subject, "html": html_body},
+            timeout=30,
+        )
+        res.raise_for_status()
+        return True
+    except Exception as exc:
+        print(f"Gửi email thất bại: {exc}")
+        return False
+
+
+def check_alert_rules(latest_rows: list[dict[str, Any]], p2p_rows: list[dict[str, Any]]) -> None:
+    sb = get_supabase_client()
+    latest = latest_rows[-1] if latest_rows else None
+    cooldown_hours = env_int("ALERT_COOLDOWN_HOURS", 6)
+    now = datetime.now(timezone.utc)
+    try:
+        rules = sb.table("alert_rules").select("*").eq("active", True).execute().data or []
+    except Exception as exc:
+        print(f"Không đọc được alert_rules (bạn đã chạy supabase/schema.sql mới chưa?): {exc}")
+        return
+
+    sent_count = 0
+    for rule in rules:
+        value = _metric_value(rule, latest, p2p_rows)
+        if value is None:
+            continue
+        threshold = clean_number(rule.get("threshold"))
+        if threshold is None or not _condition_met(value, rule.get("operator"), threshold):
+            continue
+        last = _parse_iso(rule.get("last_triggered_at"))
+        if last and (now - last).total_seconds() < cooldown_hours * 3600:
+            continue
+        email = _get_user_email(sb, str(rule.get("user_id")))
+        status = "failed"
+        if email:
+            subject = "BTC BigData Alert: điều kiện cảnh báo đã đạt"
+            html = f"""
+            <h2>BTC BigData Alert</h2>
+            <p>Điều kiện cảnh báo của bạn đã đạt.</p>
+            <ul>
+              <li>Metric: <b>{rule.get('metric')}</b></li>
+              <li>Điều kiện: <b>{rule.get('operator')} {threshold}</b></li>
+              <li>Giá trị hiện tại: <b>{value}</b></li>
+            </ul>
+            <p>Dữ liệu chỉ mang tính tham khảo, không phải lời khuyên đầu tư.</p>
+            """
+            status = "sent" if _send_resend_email(email, subject, html) else "failed"
+        try:
+            sb.table("notification_log").insert({"alert_rule_id": rule.get("id"), "channel": "email", "status": status}).execute()
+            sb.table("alert_rules").update({"last_triggered_at": now.isoformat()}).eq("id", rule.get("id")).execute()
+            sent_count += 1 if status == "sent" else 0
+        except Exception as exc:
+            print(f"Không cập nhật log cảnh báo {rule.get('id')}: {exc}")
+    print(f"Alert rules checked: {len(rules)}, emails sent: {sent_count}")
+
 def main():
     hours = env_int("SYNC_HOURS", 720)
     source = os.getenv("SYNC_SOURCE", "public_api").strip().lower()
@@ -474,6 +587,7 @@ def main():
     print(f"Upserted OHLCV rows: {ohlcv_count}")
     print(f"Upserted P2P rows  : {p2p_count}")
     print(f"Latest OHLCV timestamp: {latest_ts}")
+    check_alert_rules(ohlcv_rows, p2p_rows)
     print("Done.")
 
 

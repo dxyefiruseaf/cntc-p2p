@@ -24,6 +24,20 @@ class Settings(BaseSettings):
     groq_api_key: str | None = None
     openai_api_key: str | None = None
 
+    # Email alerts (Resend)
+    resend_api_key: str | None = None
+    alert_from_email: str = "BTC BigData Alert <onboarding@resend.dev>"
+    alert_cooldown_hours: int = 6
+
+    # Frontend / payment redirects
+    frontend_url: str = "http://localhost:5173"
+
+    # VNPay Sandbox
+    vnpay_tmn_code: str | None = None
+    vnpay_hash_secret: str | None = None
+    vnpay_pay_url: str = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"
+    vnpay_return_url: str = "http://localhost:8000/api/payment/return"
+
     admin_seed_token: str = "change-me"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

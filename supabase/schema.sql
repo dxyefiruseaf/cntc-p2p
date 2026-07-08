@@ -85,3 +85,73 @@ create table if not exists public.trade_simulations (
 
 create index if not exists idx_trade_simulations_created_at_desc
     on public.trade_simulations (created_at desc);
+
+-- ---------------------------------------------------------------------------
+-- Feature upgrade v1: Auth-owned histories, alerts, and VNPay sandbox
+-- ---------------------------------------------------------------------------
+
+alter table public.ai_analysis_history
+    add column if not exists user_id uuid references auth.users(id);
+
+create index if not exists idx_ai_analysis_history_user_created_at_desc
+    on public.ai_analysis_history (user_id, created_at desc);
+
+create table if not exists public.demo_trades (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid references auth.users(id) not null,
+    side text not null check (side in ('buy', 'sell')),
+    amount_vnd numeric not null,
+    amount_usdt numeric null,
+    price_source text not null check (price_source in ('p2p', 'market')),
+    applied_price numeric null,
+    created_at timestamptz default now()
+);
+
+create index if not exists idx_demo_trades_user_created_at_desc
+    on public.demo_trades (user_id, created_at desc);
+
+create table if not exists public.alert_rules (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid references auth.users(id) not null,
+    metric text not null check (metric in ('price', 'rsi', 'p2p_spread_sell', 'p2p_spread_buy')),
+    operator text not null check (operator in ('gt', 'lt')),
+    threshold numeric not null,
+    active boolean default true,
+    last_triggered_at timestamptz,
+    created_at timestamptz default now()
+);
+
+create index if not exists idx_alert_rules_active
+    on public.alert_rules (active);
+create index if not exists idx_alert_rules_user_created_at_desc
+    on public.alert_rules (user_id, created_at desc);
+
+create table if not exists public.notification_log (
+    id uuid primary key default gen_random_uuid(),
+    alert_rule_id uuid references public.alert_rules(id),
+    sent_at timestamptz default now(),
+    channel text default 'email',
+    status text check (status in ('sent', 'failed', 'skipped'))
+);
+
+create table if not exists public.orders (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid references auth.users(id) not null,
+    plan_id text not null,
+    amount_vnd numeric not null,
+    vnp_txn_ref text unique not null,
+    status text default 'pending' check (status in ('pending', 'success', 'failed')),
+    created_at timestamptz default now(),
+    paid_at timestamptz
+);
+
+create index if not exists idx_orders_user_created_at_desc
+    on public.orders (user_id, created_at desc);
+
+create table if not exists public.subscriptions (
+    user_id uuid references auth.users(id) not null,
+    plan_id text not null,
+    active boolean default false,
+    expires_at timestamptz,
+    primary key (user_id, plan_id)
+);

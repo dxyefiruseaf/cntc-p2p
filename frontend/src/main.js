@@ -1,6 +1,18 @@
 import './styles.css';
+import { createClient } from '@supabase/supabase-js';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const supabaseAuth = SUPABASE_URL && SUPABASE_ANON_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
+      }
+    })
+  : null;
 const VN_TZ = 'Asia/Ho_Chi_Minh';
 const app = document.getElementById('app');
 const sideNav = document.getElementById('sideNav');
@@ -17,7 +29,11 @@ let chatMessages = [
     text: 'Xin chào! Tôi là AI Advisor của BTC BigData. Bạn có thể hỏi: “Giờ nên mua hay bán?”, “Bán P2P có thiệt không?”, hoặc “Bán 100 triệu thì thuế bao nhiêu?”.'
   }
 ];
-let orders = loadOrders();
+let orders = [];
+let currentSession = null;
+let authReady = !supabaseAuth;
+const protectedRoutes = new Set(['history', 'alerts', 'billing', 'set-password', 'account']);
+const trustRoutes = new Set(['dashboard', 'chart', 'p2p', 'tax', 'settlement', 'chat']);
 
 const signalMap = {
   BUY: { vi: 'MUA', className: 'buy', icon: '↗' },
@@ -33,9 +49,17 @@ const routes = {
   chart: renderChartPage,
   p2p: renderP2PPage,
   tax: renderTaxPage,
+  settlement: renderSettlementPage,
   chat: renderChatPage,
   trade: renderTradePage,
-  history: renderHistoryPage
+  history: renderHistoryPage,
+  alerts: renderAlertsPage,
+  billing: renderBillingPage,
+  login: renderLoginPage,
+  'set-password': renderSetPasswordPage,
+  account: renderAccountPage,
+  about: renderAboutPage,
+  'payment-result': renderPaymentResultPage
 };
 
 menuToggle?.addEventListener('click', () => sideNav?.classList.toggle('open'));
@@ -49,6 +73,10 @@ topTicker?.addEventListener('click', () => {
   showToast('Đã chuyển tới Dashboard để xem giá và tín hiệu mới nhất.');
 });
 
+installAuthUxStyles();
+installCompactNavigation();
+installFloatingAIChat();
+initAuth();
 route();
 refreshTopTicker();
 setInterval(refreshTopTicker, 60_000);
@@ -58,9 +86,22 @@ function route() {
   const raw = (location.hash || '#business').replace('#', '');
   const name = raw.split('?')[0] || 'business';
   activeRoute = routes[name] ? name : 'business';
+  if (protectedRoutes.has(activeRoute)) {
+    if (!authReady) {
+      app.innerHTML = loadingCard(160);
+      return;
+    }
+    if (!currentSession) {
+      showToast('Cần đăng nhập để dùng tính năng này.');
+      setPendingNextRoute(activeRoute);
+      location.hash = `#login?next=${encodeURIComponent(activeRoute)}`;
+      return;
+    }
+  }
   document.querySelectorAll('[data-route]').forEach(el => el.classList.toggle('active', el.dataset.route === activeRoute));
   app.innerHTML = '';
   routes[activeRoute]();
+  if (trustRoutes.has(activeRoute)) mountDataTrustBadge();
   app.focus({ preventScroll: true });
 }
 
@@ -159,7 +200,7 @@ async function fetchJson(endpoint, options = {}) {
   try {
     const response = await fetch(`${API_BASE}${endpoint}`, {
       method: options.method || 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeader(), ...(options.headers || {}) },
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: controller.signal
     });
@@ -698,7 +739,7 @@ async function askAI(question) {
   try {
     const response = await fetch(`${API_BASE}/api/ai/ask`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeader() },
       body: JSON.stringify({ question, risk_profile: 'moderate' })
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -726,89 +767,126 @@ async function askAI(question) {
   }
 }
 
+
 async function renderHistoryPage() {
   app.innerHTML = `
-    <section class="page-head"><div><span class="eyebrow">Lịch sử AI</span><h1>Các lần phân tích AI đã lưu</h1><p class="lead">Dữ liệu lấy từ <code>/api/ai/history</code>, có thể lưu ở Supabase bảng <code>ai_analysis_history</code>.</p></div></section>
-    <section id="historyContent">${loadingCard(420)}</section>
+    <section class="page-head"><div><span class="eyebrow">Lịch sử theo tài khoản</span><h1>Lịch sử AI và giao dịch demo</h1><p class="lead">Trang này yêu cầu đăng nhập. Lịch sử được đọc từ Supabase theo access token, không còn phụ thuộc localStorage.</p></div></section>
+    <section class="card">
+      <div class="segmented" id="historyTabs"><button data-tab="ai" class="active">Lịch sử AI</button><button data-tab="trades">Giao dịch demo</button></div>
+      <div id="historyContent" style="margin-top:16px">${loadingCard(360)}</div>
+    </section>
   `;
+  document.querySelectorAll('#historyTabs button').forEach(btn => btn.addEventListener('click', () => {
+    document.querySelectorAll('#historyTabs button').forEach(b => b.classList.toggle('active', b === btn));
+    if (btn.dataset.tab === 'ai') loadAccountAIHistory(); else loadAccountTradeHistory();
+  }));
+  await loadAccountAIHistory();
+}
+
+async function loadAccountAIHistory() {
+  const box = document.getElementById('historyContent');
+  if (!box) return;
+  box.innerHTML = loadingCard(360);
   try {
     const res = await fetchJson('/api/ai/history?limit=24');
     const rows = res.data.data || [];
-    document.getElementById('historyContent').innerHTML = rows.length ? `
+    box.innerHTML = rows.length ? `
       <div class="timeline">
-        ${rows.map(row => `<div class="timeline-item"><div class="timeline-time">${formatVNTime(row.created_at || row.timestamp, 'short')}</div><div class="card"><span class="badge ${(row.verdict || 'NEUTRAL').toLowerCase()}">${row.verdict || 'NEUTRAL'}</span><h3 style="margin-top:10px">${escapeHTML(row.question || 'AI phân tích định kỳ')}</h3><p>${escapeHTML(row.answer || row.summary || '')}</p></div></div>`).join('')}
+        ${rows.map(row => `<div class="timeline-item"><div class="timeline-time">${formatVNTime(row.created_at || row.timestamp, 'short')}</div><div class="card"><span class="badge ${(row.verdict || 'NEUTRAL').toLowerCase()}">${row.verdict || 'NEUTRAL'}</span><h3 style="margin-top:10px">${escapeHTML(row.question || 'AI phân tích')}</h3><p>${escapeHTML(row.answer || row.summary || '')}</p></div></div>`).join('')}
       </div>
-    ` : `<div class="state-box empty">Chưa có lịch sử AI.</div>`;
-  } catch (error) {
-    document.getElementById('historyContent').innerHTML = errorBox(error.message);
-  }
+    ` : `<div class="state-box empty">Chưa có lịch sử AI cho tài khoản này.</div>`;
+  } catch (error) { box.innerHTML = errorBox(error.message); }
+}
+
+async function loadAccountTradeHistory() {
+  const box = document.getElementById('historyContent');
+  if (!box) return;
+  box.innerHTML = loadingCard(260);
+  try {
+    const res = await fetchJson('/api/demo-trades?limit=50');
+    const rows = res.data.data || [];
+    box.innerHTML = rows.length ? `<div class="trade-history">${rows.map(tradeRowHTML).join('')}</div>` : `<div class="state-box empty">Chưa có giao dịch demo nào.</div>`;
+  } catch (error) { box.innerHTML = errorBox(error.message); }
 }
 
 function renderTradePage() {
   const params = new URLSearchParams((location.hash.split('?')[1] || ''));
   const side = params.get('side') || 'SELL';
   app.innerHTML = `
-    <section class="page-head"><div><span class="eyebrow">Giao dịch demo</span><h1>Mô phỏng mua/bán USDT qua P2P</h1><p class="lead">Trang này không đặt lệnh thật. Nó minh họa cách web có thể thực thi hoạt động sau khi người dùng bấm “Mua/Bán” từ trang P2P.</p></div></section>
+    <section class="page-head"><div><span class="eyebrow">Giao dịch demo</span><h1>Mô phỏng mua/bán USDT qua P2P</h1><p class="lead">Trang này không đặt lệnh thật. Nếu đã đăng nhập, lịch sử sẽ lưu theo tài khoản trong Supabase.</p></div></section>
+    ${!currentSession ? `<div class="state-box empty" style="margin-bottom:16px">Đăng nhập để lưu lịch sử giao dịch demo vĩnh viễn. <a class="btn small primary" href="#login?next=trade">Đăng nhập</a></div>` : ''}
     <section class="split">
       <div class="card">
         <div class="form-grid" style="grid-template-columns:1fr">
           <div class="field"><label>Chiều giao dịch</label><select id="tradeSide"><option value="SELL">Bán USDT lấy VNĐ</option><option value="BUY">Mua USDT bằng VNĐ</option></select></div>
           <div class="field"><label>Số tiền quy đổi (VNĐ)</label><input id="tradeAmount" type="number" value="100000000" min="1"></div>
+          <div class="field"><label>Nguồn giá</label><select id="tradePriceSource"><option value="p2p">Giá P2P</option><option value="market">Giá sàn quốc tế</option></select></div>
         </div>
         <button id="tradeSubmit" class="btn primary full" style="margin-top:14px">Tính giao dịch demo</button>
         <div id="tradeResult"></div>
       </div>
-      <div class="card"><h3>Lịch sử mô phỏng localStorage</h3><div id="tradeHistory" class="trade-history"></div><button id="clearOrders" class="btn secondary" style="margin-top:14px">Xóa lịch sử</button></div>
+      <div class="card"><h3>Lịch sử mô phỏng theo tài khoản</h3><div id="tradeHistory" class="trade-history"></div><a class="btn secondary" href="#history" style="margin-top:14px">Xem lịch sử đầy đủ</a></div>
     </section>
   `;
   document.getElementById('tradeSide').value = side;
   document.getElementById('tradeSubmit').addEventListener('click', simulateTrade);
-  document.getElementById('clearOrders').addEventListener('click', () => { orders = []; saveOrders(); renderOrderHistory(); });
-  renderOrderHistory();
+  renderAccountTradePreview();
 }
 
 async function simulateTrade() {
   const result = document.getElementById('tradeResult');
   const side = document.getElementById('tradeSide').value;
   const amount = Number(document.getElementById('tradeAmount').value);
+  const priceSource = document.getElementById('tradePriceSource').value;
   if (!amount || amount <= 0) {
     result.innerHTML = `<div class="result-panel state-box error">Số tiền phải lớn hơn 0.</div>`;
     return;
   }
   result.innerHTML = `<div class="result-panel"><div class="skeleton" style="height:120px"></div></div>`;
-  const res = await fetchJson('/api/p2p-spread?hours=168');
-  const row = latestByTradeType(res.data.data || [], side);
-  const price = row?.p2p_price || 26500;
-  const fee = amount * 0.001;
-  const tax = side === 'SELL' ? amount * 0.001 : 0;
-  const usdt = amount / price;
-  const net = side === 'SELL' ? amount - fee - tax : amount + fee;
-  const order = { side, amount, price, fee, tax, usdt, net, createdAt: new Date().toISOString() };
-  orders.unshift(order);
-  orders = orders.slice(0, 20);
-  saveOrders();
-  result.innerHTML = `
-    <div class="result-panel">
-      <span class="badge ${side === 'SELL' ? 'red' : 'green'}">${side === 'SELL' ? 'BÁN USDT' : 'MUA USDT'}</span> ${sourcePill(res.source)}
-      <h2 style="margin-top:10px">${formatNumber(usdt, 4)} USDT</h2>
-      <p>Giá P2P dùng tính: ${formatVND(price)} / USDT</p>
-      <p>Phí demo: ${formatVND(fee)} · Thuế demo: ${formatVND(tax)} · Giá trị ròng: ${formatVND(net)}</p>
-    </div>
-  `;
-  renderOrderHistory();
+  try {
+    const qs = new URLSearchParams({ amount: String(amount), unit: 'vnd', side: side.toLowerCase(), price_source: priceSource, country: 'VN' });
+    const res = await fetchJson(`/api/net-settlement?${qs.toString()}`);
+    const data = res.data;
+    if (currentSession) {
+      await fetchJson('/api/demo-trades', {
+        method: 'POST',
+        body: {
+          side,
+          amount_vnd: data.gross_amount_vnd,
+          amount_usdt: data.amount_usdt,
+          price_source: priceSource,
+          applied_price: data.applied_price
+        }
+      });
+    }
+    result.innerHTML = settlementResultHTML(data, res.source);
+    await renderAccountTradePreview();
+  } catch (error) {
+    result.innerHTML = errorBox(error.message);
+  }
 }
 
-function loadOrders() {
-  try { return JSON.parse(localStorage.getItem('btc_bigdata_orders') || '[]'); } catch (_) { return []; }
-}
-function saveOrders() { localStorage.setItem('btc_bigdata_orders', JSON.stringify(orders)); }
-function renderOrderHistory() {
+async function renderAccountTradePreview() {
   const el = document.getElementById('tradeHistory');
   if (!el) return;
-  el.innerHTML = orders.length ? orders.map(o => `
-    <div class="order-row"><div><strong>${o.side}</strong><div class="meta">${formatVNTime(o.createdAt)}</div></div><div style="text-align:right"><strong>${formatNumber(o.usdt, 4)} USDT</strong><div class="meta">${formatVND(o.amount)}</div></div></div>
-  `).join('') : `<div class="state-box empty">Chưa có giao dịch mô phỏng.</div>`;
+  if (!currentSession) {
+    el.innerHTML = `<div class="state-box empty">Bạn chưa đăng nhập nên giao dịch chỉ được tính thử, không lưu lịch sử.</div>`;
+    return;
+  }
+  try {
+    const res = await fetchJson('/api/demo-trades?limit=5');
+    const rows = res.data.data || [];
+    el.innerHTML = rows.length ? rows.map(tradeRowHTML).join('') : `<div class="state-box empty">Chưa có giao dịch mô phỏng.</div>`;
+  } catch (error) { el.innerHTML = errorBox(error.message); }
 }
+
+function tradeRowHTML(o) {
+  return `<div class="order-row"><div><strong>${String(o.side || '').toUpperCase()}</strong><div class="meta">${formatVNTime(o.created_at || o.createdAt)}</div></div><div style="text-align:right"><strong>${formatNumber(o.amount_usdt || o.usdt || 0, 4)} USDT</strong><div class="meta">${formatVND(o.amount_vnd || o.amount || 0)}</div></div></div>`;
+}
+
+function loadOrders() { return []; }
+function saveOrders() {}
+function renderOrderHistory() { renderAccountTradePreview(); }
 
 function drawLineChart(id, data, field, name) {
   const el = document.getElementById(id);
@@ -876,4 +954,791 @@ function drawP2PChart(id, rows) {
       { name: 'Spread khi MUA', type: 'line', smooth: true, showSymbol: false, data: byLabel(buy) }
     ]
   });
+}
+
+// ---------------------------------------------------------------------------
+// Feature upgrade v1 — Supabase Auth, data trust, settlement, alerts, billing
+// ---------------------------------------------------------------------------
+
+async function initAuth() {
+  ensureAuthBox();
+  renderAuthHeader();
+
+  if (!supabaseAuth) {
+    authReady = true;
+    renderAuthHeader();
+    return;
+  }
+
+  try {
+    const { data, error } = await supabaseAuth.auth.getSession();
+    if (error) console.warn('Supabase getSession error:', error.message);
+
+    currentSession = data?.session || null;
+    authReady = true;
+    await syncCurrentUserProfile();
+    renderAuthHeader();
+
+    redirectAfterLoginIfNeeded();
+
+    supabaseAuth.auth.onAuthStateChange(async (event, session) => {
+      currentSession = session || null;
+      authReady = true;
+      await syncCurrentUserProfile();
+      renderAuthHeader();
+
+      if (event === 'SIGNED_IN') {
+        if (needsPasswordSetup()) {
+          location.hash = '#set-password';
+          return;
+        }
+        redirectAfterLoginIfNeeded();
+      }
+
+      if (event === 'SIGNED_OUT' && protectedRoutes.has(activeRoute)) {
+        showToast('Bạn đã đăng xuất. Vui lòng đăng nhập để tiếp tục.');
+        location.hash = '#login';
+      }
+    });
+  } catch (error) {
+    console.error('Không khởi tạo được Supabase Auth:', error);
+    authReady = true;
+    renderAuthHeader();
+  }
+
+  route();
+}
+
+function authHeader() {
+  return currentSession?.access_token ? { Authorization: `Bearer ${currentSession.access_token}` } : {};
+}
+
+function ensureAuthBox() {
+  if (document.getElementById('authBox') || document.getElementById('authArea')) return;
+
+  const topActions = document.querySelector('.top-actions');
+  if (!topActions) return;
+
+  const authBox = document.createElement('div');
+  authBox.id = 'authBox';
+  authBox.className = 'auth-box';
+
+  const demoButton = topActions.querySelector('a.btn');
+  if (demoButton) {
+    topActions.insertBefore(authBox, demoButton);
+  } else {
+    topActions.appendChild(authBox);
+  }
+}
+
+function getAuthBox() {
+  return document.getElementById('authBox') || document.getElementById('authArea');
+}
+
+function setPendingNextRoute(routeName) {
+  const safeRoute = routes[routeName] ? routeName : 'dashboard';
+  try {
+    localStorage.setItem('btc_bigdata_auth_next', safeRoute);
+  } catch (_) {}
+}
+
+function consumePendingNextRoute() {
+  try {
+    const saved = localStorage.getItem('btc_bigdata_auth_next');
+    localStorage.removeItem('btc_bigdata_auth_next');
+    return routes[saved] ? saved : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function getLoginNextRoute() {
+  const params = new URLSearchParams((location.hash.split('?')[1] || ''));
+  const next = params.get('next') || consumePendingNextRoute() || 'dashboard';
+  return routes[next] ? next : 'dashboard';
+}
+
+function redirectAfterLoginIfNeeded() {
+  if (!currentSession) return;
+
+  const currentHashRoute = (location.hash || '').replace('#', '').split('?')[0];
+  if (needsPasswordSetup() && currentHashRoute !== 'set-password') {
+    location.hash = '#set-password';
+    return;
+  }
+
+  const pending = currentHashRoute === 'login' ? getLoginNextRoute() : consumePendingNextRoute();
+
+  if (pending && routes[pending] && currentHashRoute !== pending) {
+    location.hash = `#${pending}`;
+  }
+}
+
+function renderAuthHeader() {
+  ensureAuthBox();
+  const el = getAuthBox();
+  if (!el) return;
+
+  if (!supabaseAuth) {
+    el.innerHTML = `<a class="btn small secondary auth-entry" href="#login" title="Cần cấu hình VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY">Tài khoản</a>`;
+    return;
+  }
+
+  if (!authReady) {
+    el.innerHTML = `<span class="badge amber">Đang kiểm tra...</span>`;
+    return;
+  }
+
+  const email = currentSession?.user?.email;
+  if (email) {
+    const passwordState = needsPasswordSetup() ? '<span class="auth-warn-dot" title="Cần đặt mật khẩu"></span>' : '';
+    el.innerHTML = `
+      <a class="user-email" href="#account" title="${escapeHTML(email)}">${passwordState}${escapeHTML(shortEmail(email))}</a>
+      <button id="logoutBtn" class="btn small secondary" type="button">Đăng xuất</button>
+    `;
+    document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+      await supabaseAuth.auth.signOut();
+      currentSession = null;
+      showToast('Đã đăng xuất.');
+      renderAuthHeader();
+      if (protectedRoutes.has(activeRoute)) location.hash = '#login';
+      else route();
+    });
+  } else {
+    el.innerHTML = `<a class="btn small secondary auth-entry" href="#login">Tài khoản</a>`;
+  }
+}
+
+function shortEmail(email) {
+  if (!email || email.length <= 24) return email;
+  const [name, domain] = email.split('@');
+  return `${name.slice(0, 10)}…@${domain}`;
+}
+
+
+function installAuthUxStyles() {
+  if (document.getElementById('authUxStyles')) return;
+  const style = document.createElement('style');
+  style.id = 'authUxStyles';
+  style.textContent = `
+    .auth-box, #authArea { display:flex; align-items:center; gap:8px; }
+    .auth-entry { border-radius:999px; }
+    .user-email { display:inline-flex; align-items:center; gap:6px; max-width:180px; padding:8px 10px; border-radius:999px; background:rgba(15,23,42,.06); color:inherit; text-decoration:none; font-weight:700; font-size:.88rem; }
+    .auth-warn-dot { width:8px; height:8px; border-radius:999px; background:#f59e0b; box-shadow:0 0 0 3px rgba(245,158,11,.16); }
+    .auth-shell { display:grid; grid-template-columns:minmax(0,1.05fr) minmax(320px,.95fr); gap:22px; align-items:stretch; }
+    .auth-shell.single { grid-template-columns:minmax(320px,620px); justify-content:center; }
+    .auth-panel { border:1px solid rgba(148,163,184,.22); border-radius:28px; background:rgba(255,255,255,.9); box-shadow:0 20px 70px rgba(15,23,42,.08); padding:28px; }
+    .auth-copy { background:linear-gradient(145deg, rgba(15,23,42,.96), rgba(30,41,59,.9)); color:white; overflow:hidden; position:relative; }
+    .auth-copy .lead, .auth-copy p { color:rgba(255,255,255,.78); }
+    .auth-steps { display:grid; gap:12px; margin-top:24px; }
+    .auth-steps div { display:flex; align-items:center; gap:12px; padding:12px; border-radius:18px; background:rgba(255,255,255,.08); }
+    .auth-steps b { width:30px; height:30px; display:grid; place-items:center; border-radius:999px; background:#f59e0b; color:#111827; }
+    .auth-form-card h2, .auth-form-card h1 { margin-top:10px; }
+    .auth-tabs { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:6px; background:#f1f5f9; border-radius:16px; margin-bottom:18px; }
+    .auth-tabs button { border:0; padding:10px 12px; border-radius:12px; background:transparent; font-weight:800; cursor:pointer; color:#64748b; }
+    .auth-tabs button.active { background:white; color:#0f172a; box-shadow:0 6px 22px rgba(15,23,42,.08); }
+    .auth-mode-panel.hidden, .hidden { display:none !important; }
+    .auth-actions-row { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }
+    .password-hint, .muted { color:#64748b; font-size:.92rem; }
+    .side-nav { width:min(280px, 82vw); }
+    .side-nav [data-route] { border-radius:14px; }
+    .side-nav small, .side-nav .nav-desc, .side-nav p { display:none !important; }
+    .side-nav a { min-height:40px; }
+
+    /* UI/UX compact mode: giảm chiều dài navigation, tránh phải cuộn sidebar. */
+    body.ux-sidebar-compact { --sidebar: 86px; }
+    body.ux-sidebar-compact .side-nav { width:86px; padding:12px 9px; overflow-y:visible; }
+    body.ux-sidebar-compact .side-head { margin:2px 0 10px; padding:9px 6px; border-radius:16px; text-align:center; }
+    body.ux-sidebar-compact .side-head strong { font-size:0; }
+    body.ux-sidebar-compact .side-head strong::before { content:'₿'; display:grid; place-items:center; width:38px; height:38px; margin:0 auto; border-radius:14px; background:#f7931a; color:#fff; font-size:1.25rem; }
+    body.ux-sidebar-compact .side-head span,
+    body.ux-sidebar-compact .side-label { display:none !important; }
+    body.ux-sidebar-compact .side-nav a { justify-content:center; gap:0; min-height:42px; margin:5px 0; padding:10px 0; font-size:0; border-radius:16px; }
+    body.ux-sidebar-compact .side-nav a span { display:grid; place-items:center; width:28px; height:28px; margin:0; font-size:1rem; }
+    body.ux-sidebar-compact .side-nav a:hover::after { content:attr(title); position:absolute; left:72px; z-index:120; padding:8px 10px; border-radius:12px; white-space:nowrap; background:#0f172a; color:#fff; font-size:.82rem; font-weight:800; box-shadow:0 14px 42px rgba(15,23,42,.22); }
+    .side-nav a { position:relative; }
+    .sidebar-collapse-toggle { width:100%; border:1px solid var(--border); border-radius:14px; background:#fff; color:var(--muted-2); min-height:34px; font-weight:900; margin:0 0 10px; }
+    body.ux-sidebar-compact .sidebar-collapse-toggle { height:36px; font-size:0; padding:0; }
+    body.ux-sidebar-compact .sidebar-collapse-toggle::before { content:'☰'; font-size:1rem; }
+    body:not(.ux-sidebar-compact) .sidebar-collapse-toggle::before { content:'Thu gọn '; }
+    body:not(.ux-sidebar-compact) .sidebar-collapse-toggle::after { content:'←'; }
+    @media (max-height:720px) { body.ux-sidebar-compact .side-nav a { min-height:36px; margin:3px 0; } }
+
+    /* Floating AI Messenger */
+    .floating-ai-button { position:fixed; right:22px; bottom:22px; z-index:95; width:58px; height:58px; border:0; border-radius:999px; background:linear-gradient(135deg,#2563eb,#7c3aed); color:#fff; box-shadow:0 22px 55px rgba(37,99,235,.35); display:grid; place-items:center; font-size:1.35rem; }
+    .floating-ai-button .unread-dot { position:absolute; top:8px; right:8px; width:10px; height:10px; border-radius:999px; background:#f59e0b; box-shadow:0 0 0 4px rgba(245,158,11,.22); }
+    .floating-ai-panel { position:fixed; right:22px; bottom:92px; z-index:96; width:min(410px, calc(100vw - 28px)); max-height:min(680px, calc(100vh - 120px)); display:none; grid-template-rows:auto minmax(220px,1fr) auto; overflow:hidden; border:1px solid rgba(148,163,184,.28); border-radius:26px; background:rgba(255,255,255,.98); box-shadow:0 30px 90px rgba(15,23,42,.22); backdrop-filter:blur(16px); }
+    .floating-ai-panel.open { display:grid; }
+    .floating-ai-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 16px; background:linear-gradient(135deg,#0f172a,#1e293b); color:#fff; }
+    .floating-ai-title { display:flex; align-items:center; gap:10px; }
+    .floating-ai-avatar { width:38px; height:38px; display:grid; place-items:center; border-radius:16px; background:#f7931a; }
+    .floating-ai-title strong { display:block; }
+    .floating-ai-title small { display:block; color:rgba(255,255,255,.72); margin-top:1px; }
+    .floating-ai-close { border:0; background:rgba(255,255,255,.12); color:#fff; width:34px; height:34px; border-radius:12px; font-weight:900; }
+    .floating-ai-messages { overflow-y:auto; padding:14px; display:grid; gap:10px; background:linear-gradient(180deg,#f8fafc,#eef2ff); }
+    .floating-ai-msg { max-width:86%; padding:10px 12px; border-radius:18px; white-space:pre-wrap; line-height:1.45; font-size:.92rem; box-shadow:0 8px 22px rgba(15,23,42,.06); }
+    .floating-ai-msg.ai { justify-self:start; background:#fff; color:#0f172a; border-bottom-left-radius:6px; }
+    .floating-ai-msg.user { justify-self:end; background:#2563eb; color:#fff; border-bottom-right-radius:6px; }
+    .floating-ai-quick { display:flex; gap:8px; padding:0 14px 10px; overflow-x:auto; background:#eef2ff; }
+    .floating-ai-quick button { border:1px solid rgba(37,99,235,.18); background:#fff; color:#1d4ed8; border-radius:999px; padding:7px 10px; font-size:.78rem; font-weight:800; white-space:nowrap; }
+    .floating-ai-input { display:flex; gap:8px; padding:12px; border-top:1px solid rgba(226,232,240,.9); background:#fff; }
+    .floating-ai-input input { flex:1; border:1px solid var(--border); border-radius:16px; padding:11px 12px; outline:none; }
+    .floating-ai-input button { border:0; border-radius:16px; padding:0 14px; background:#2563eb; color:#fff; font-weight:900; }
+    body.floating-ai-open .floating-ai-button { transform:scale(.92); }
+    .toast { bottom:92px; }
+    @media (max-width:720px) { .floating-ai-panel { right:10px; bottom:80px; width:calc(100vw - 20px); border-radius:22px; } .floating-ai-button { right:16px; bottom:16px; } body.ux-sidebar-compact { --sidebar:0px; } }
+
+    @media (max-width:900px) { .auth-shell { grid-template-columns:1fr; } .auth-copy { min-height:auto; } }
+  `;
+  document.head.appendChild(style);
+}
+
+
+function installCompactNavigation() {
+  const nav = document.getElementById('sideNav');
+  if (!nav || nav.dataset.compactReady === '1') return;
+  nav.dataset.compactReady = '1';
+
+  // Mặc định dùng compact để người dùng không phải cuộn trang bên trái.
+  const saved = localStorage.getItem('btc_bigdata_sidebar_compact');
+  document.body.classList.toggle('ux-sidebar-compact', saved !== '0');
+
+  nav.querySelectorAll('a[data-route]').forEach(link => {
+    const text = link.textContent.replace(/\s+/g, ' ').trim();
+    if (!link.title) link.title = text;
+  });
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'sidebar-collapse-toggle';
+  toggle.title = 'Thu gọn / mở rộng thanh điều hướng';
+  toggle.setAttribute('aria-label', 'Thu gọn hoặc mở rộng thanh điều hướng');
+  toggle.addEventListener('click', () => {
+    const compact = !document.body.classList.contains('ux-sidebar-compact');
+    document.body.classList.toggle('ux-sidebar-compact', compact);
+    localStorage.setItem('btc_bigdata_sidebar_compact', compact ? '1' : '0');
+    window.setTimeout(() => charts.forEach(chart => chart.resize()), 160);
+  });
+
+  const head = nav.querySelector('.side-head');
+  if (head?.nextSibling) nav.insertBefore(toggle, head.nextSibling);
+  else nav.prepend(toggle);
+}
+
+function installFloatingAIChat() {
+  if (document.getElementById('floatingAIWidget')) return;
+
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="floatingAIWidget" class="floating-ai-widget" aria-live="polite">
+      <button id="floatingAIButton" class="floating-ai-button" type="button" aria-label="Mở AI Advisor">
+        🤖<span class="unread-dot" aria-hidden="true"></span>
+      </button>
+      <section id="floatingAIPanel" class="floating-ai-panel" aria-label="AI Advisor chat nhanh">
+        <div class="floating-ai-head">
+          <div class="floating-ai-title">
+            <div class="floating-ai-avatar">₿</div>
+            <div><strong>AI Advisor</strong><small>Hỏi nhanh khi đang xem dữ liệu</small></div>
+          </div>
+          <button id="floatingAIClose" class="floating-ai-close" type="button" aria-label="Đóng chat">×</button>
+        </div>
+        <div id="floatingAIMessages" class="floating-ai-messages"></div>
+        <div class="floating-ai-quick">
+          <button type="button" data-floating-question="Giờ nên mua hay bán BTC?">Nên mua/bán?</button>
+          <button type="button" data-floating-question="P2P hiện tại có lợi hay thiệt?">P2P lợi/thiệt?</button>
+          <button type="button" data-floating-question="Giải thích RSI và MACD hiện tại">RSI/MACD</button>
+        </div>
+        <form id="floatingAIForm" class="floating-ai-input">
+          <input id="floatingAIInput" type="text" placeholder="Hỏi AI mà không rời trang..." autocomplete="off" />
+          <button type="submit">Gửi</button>
+        </form>
+      </section>
+    </div>
+  `);
+
+  const button = document.getElementById('floatingAIButton');
+  const close = document.getElementById('floatingAIClose');
+  const form = document.getElementById('floatingAIForm');
+
+  button?.addEventListener('click', () => toggleFloatingAI());
+  close?.addEventListener('click', () => toggleFloatingAI(false));
+  form?.addEventListener('submit', event => {
+    event.preventDefault();
+    sendFloatingAIMessage();
+  });
+  document.querySelectorAll('[data-floating-question]').forEach(btn => btn.addEventListener('click', () => {
+    const input = document.getElementById('floatingAIInput');
+    if (input) input.value = btn.dataset.floatingQuestion;
+    sendFloatingAIMessage();
+  }));
+
+  renderFloatingAIMessages();
+}
+
+function toggleFloatingAI(forceOpen) {
+  const panel = document.getElementById('floatingAIPanel');
+  if (!panel) return;
+  const open = typeof forceOpen === 'boolean' ? forceOpen : !panel.classList.contains('open');
+  panel.classList.toggle('open', open);
+  document.body.classList.toggle('floating-ai-open', open);
+  document.querySelector('.floating-ai-button .unread-dot')?.classList.toggle('hidden', open);
+  if (open) {
+    renderFloatingAIMessages();
+    window.setTimeout(() => document.getElementById('floatingAIInput')?.focus(), 80);
+  }
+}
+
+function renderFloatingAIMessages() {
+  const box = document.getElementById('floatingAIMessages');
+  if (!box) return;
+  box.innerHTML = chatMessages.map(m => `<div class="floating-ai-msg ${m.role === 'user' ? 'user' : 'ai'}">${escapeHTML(m.text)}</div>`).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendFloatingAIMessage() {
+  const input = document.getElementById('floatingAIInput');
+  const question = input?.value.trim();
+  if (!question) return;
+
+  input.value = '';
+  chatMessages.push({ role: 'user', text: question });
+  chatMessages.push({ role: 'ai', text: 'AI đang phân tích dữ liệu bạn đang xem...' });
+  renderFloatingAIMessages();
+  renderMessages();
+
+  try {
+    const res = await askAI(question);
+    const data = res.data;
+    chatMessages[chatMessages.length - 1] = {
+      role: 'ai',
+      text: `${signalMap[data.verdict]?.vi || data.verdict} · Độ tin cậy ${data.confidence || 50}%\n\n${data.answer}\n\nLý do:\n${(data.reasons || []).map(x => `- ${x}`).join('\n')}\n\nRủi ro:\n${(data.risks || []).map(x => `- ${x}`).join('\n')}\n\n${data.disclaimer || 'Thông tin chỉ mang tính tham khảo.'}`
+    };
+  } catch (error) {
+    chatMessages[chatMessages.length - 1] = { role: 'ai', text: `AI hiện không phản hồi được: ${error.message}` };
+  }
+
+  renderFloatingAIMessages();
+  renderMessages();
+}
+
+function mountDataTrustBadge() {
+  if (document.getElementById('dataTrustBadge')) return;
+  app.insertAdjacentHTML('afterbegin', `<div id="dataTrustBadge" class="trust-badge"><span class="dot neutral"></span>Đang kiểm tra độ tin cậy dữ liệu...</div>`);
+  refreshDataTrustBadge();
+}
+
+async function refreshDataTrustBadge() {
+  const el = document.getElementById('dataTrustBadge');
+  if (!el) return;
+  try {
+    const res = await fetchJson('/api/data-status', { timeout: 6000 });
+    const s = res.data;
+    const o = ageText(s.ohlcv_age_hours);
+    const p = ageText(s.p2p_age_hours);
+    const level = (!s.is_ohlcv_fresh || !s.is_p2p_fresh) ? ((s.ohlcv_age_hours > 6 || s.p2p_age_hours > 6) ? 'danger' : 'warn') : 'ok';
+    el.className = `trust-badge ${level}`;
+    el.innerHTML = `<span class="dot ${level}"></span>Dữ liệu giá: cập nhật ${o} · Dữ liệu P2P: cập nhật ${p}${level !== 'ok' ? '<br><b>⚠ Dữ liệu có thể chưa cập nhật kịp thời, đội ngũ đang kiểm tra.</b>' : ''}`;
+  } catch (error) {
+    el.className = 'trust-badge warn';
+    el.innerHTML = `<span class="dot warn"></span>Không kiểm tra được độ tin cậy dữ liệu: ${escapeHTML(error.message)}`;
+  }
+}
+
+function ageText(hours) {
+  if (!isNum(hours)) return 'chưa rõ';
+  if (hours < 1) return `${Math.round(hours * 60)} phút trước`;
+  if (hours < 24) return `${formatNumber(hours, 1)} giờ trước`;
+  return `${formatNumber(hours / 24, 1)} ngày trước`;
+}
+
+function renderLoginPage() {
+  const next = getLoginNextRoute();
+
+  app.innerHTML = `
+    <section class="auth-shell">
+      <div class="auth-panel auth-copy">
+        <span class="eyebrow">BTC BigData Account</span>
+        <h1>Tài khoản an toàn cho lịch sử, cảnh báo và mua gói</h1>
+        <p class="lead">Đăng ký theo luồng bảo mật: xác thực email bằng Supabase Magic Link trước, sau đó mới đặt mật khẩu để dùng lâu dài.</p>
+        <div class="auth-steps">
+          <div><b>1</b><span>Nhập email</span></div>
+          <div><b>2</b><span>Bấm magic link trong email</span></div>
+          <div><b>3</b><span>Đặt mật khẩu</span></div>
+          <div><b>4</b><span>Dữ liệu lưu riêng theo tài khoản</span></div>
+        </div>
+      </div>
+
+      <div class="auth-panel auth-form-card">
+        ${currentSession ? `
+          <span class="badge green">Đã đăng nhập</span>
+          <h2>${escapeHTML(shortEmail(currentSession.user.email))}</h2>
+          <p class="muted">Tài khoản đã sẵn sàng. Bạn có thể vào trang cần dùng hoặc quản lý bảo mật.</p>
+          <div class="auth-actions-row">
+            <a class="btn primary" href="#${escapeHTML(needsPasswordSetup() ? 'set-password' : next)}">${needsPasswordSetup() ? 'Đặt mật khẩu' : 'Đi tiếp'}</a>
+            <a class="btn secondary" href="#account">Quản lý tài khoản</a>
+          </div>
+        ` : `
+          ${!supabaseAuth ? `
+            <div class="state-box error">
+              Chưa cấu hình Supabase Auth. Hãy thêm <code>VITE_SUPABASE_URL</code> và <code>VITE_SUPABASE_ANON_KEY</code> vào <code>frontend/.env</code>, sau đó chạy lại <code>npm run dev</code>.
+            </div>
+          ` : ''}
+
+          <div class="auth-tabs" id="authModeTabs">
+            <button class="active" data-auth-mode="register" type="button">Đăng ký</button>
+            <button data-auth-mode="login" type="button">Đăng nhập</button>
+          </div>
+
+          <div id="registerPanel" class="auth-mode-panel">
+            <h2>Tạo tài khoản</h2>
+            <p class="muted">Không đặt mật khẩu ngay. Hệ thống sẽ gửi magic link để xác thực email trước.</p>
+            <div class="field"><label>Email</label><input id="registerEmail" type="email" placeholder="you@example.com" autocomplete="email"></div>
+            <button id="registerSubmit" class="btn primary full" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Gửi magic link xác thực</button>
+          </div>
+
+          <div id="loginPanel" class="auth-mode-panel hidden">
+            <h2>Đăng nhập</h2>
+            <p class="muted">Dùng mật khẩu sau khi đã xác thực email và đặt mật khẩu lần đầu.</p>
+            <div class="field"><label>Email</label><input id="loginEmail" type="email" placeholder="you@example.com" autocomplete="email"></div>
+            <div class="field"><label>Mật khẩu</label><input id="loginPassword" type="password" placeholder="••••••••" autocomplete="current-password"></div>
+            <button id="passwordLoginSubmit" class="btn primary full" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Đăng nhập</button>
+            <button id="magicLoginSubmit" class="btn secondary full" style="margin-top:10px" ${!supabaseAuth ? 'disabled' : ''}>Gửi magic link thay thế</button>
+          </div>
+
+          <div id="loginResult"></div>
+        `}
+      </div>
+    </section>
+  `;
+
+  setupAuthTabs();
+  document.getElementById('registerSubmit')?.addEventListener('click', () => requestMagicLink('register', next));
+  document.getElementById('magicLoginSubmit')?.addEventListener('click', () => requestMagicLink('login', next));
+  document.getElementById('passwordLoginSubmit')?.addEventListener('click', () => signInWithPasswordUI(next));
+}
+
+function setupAuthTabs() {
+  document.querySelectorAll('[data-auth-mode]').forEach(btn => btn.addEventListener('click', () => {
+    const mode = btn.dataset.authMode;
+    document.querySelectorAll('[data-auth-mode]').forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById('registerPanel')?.classList.toggle('hidden', mode !== 'register');
+    document.getElementById('loginPanel')?.classList.toggle('hidden', mode !== 'login');
+    const result = document.getElementById('loginResult');
+    if (result) result.innerHTML = '';
+  }));
+}
+
+async function requestMagicLink(mode, next = 'dashboard') {
+  const inputId = mode === 'register' ? 'registerEmail' : 'loginEmail';
+  const email = document.getElementById(inputId)?.value.trim();
+  const result = document.getElementById('loginResult');
+
+  if (!email) {
+    result.innerHTML = `<div class="state-box error">Vui lòng nhập email.</div>`;
+    return;
+  }
+  if (!supabaseAuth) {
+    result.innerHTML = `<div class="state-box error">Chưa cấu hình VITE_SUPABASE_URL/VITE_SUPABASE_ANON_KEY.</div>`;
+    return;
+  }
+
+  setPendingNextRoute(mode === 'register' ? 'set-password' : next);
+  result.innerHTML = `<div class="state-box empty">Đang gửi magic link xác thực...</div>`;
+
+  const redirectTo = `${window.location.origin}${window.location.pathname}`;
+  const { error } = await supabaseAuth.auth.signInWithOtp({
+    email,
+    options: {
+      emailRedirectTo: redirectTo,
+      shouldCreateUser: mode === 'register'
+    }
+  });
+
+  result.innerHTML = error
+    ? `<div class="state-box error">${escapeHTML(error.message)}</div>`
+    : `<div class="state-box empty"><b>Đã gửi magic link tới ${escapeHTML(email)}.</b><br>Hãy mở email và bấm link xác thực. Sau khi quay lại web, hệ thống sẽ yêu cầu bạn đặt mật khẩu.</div>`;
+}
+
+async function signInWithPasswordUI(next = 'dashboard') {
+  const email = document.getElementById('loginEmail')?.value.trim();
+  const password = document.getElementById('loginPassword')?.value || '';
+  const result = document.getElementById('loginResult');
+
+  if (!email || !password) {
+    result.innerHTML = `<div class="state-box error">Vui lòng nhập email và mật khẩu.</div>`;
+    return;
+  }
+
+  result.innerHTML = `<div class="state-box empty">Đang đăng nhập...</div>`;
+  const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
+
+  if (error) {
+    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu bạn chưa đặt mật khẩu, hãy dùng nút gửi magic link.</small></div>`;
+    return;
+  }
+
+  currentSession = data.session || null;
+  await syncCurrentUserProfile();
+  renderAuthHeader();
+  showToast('Đăng nhập thành công.');
+  location.hash = needsPasswordSetup() ? '#set-password' : `#${next}`;
+}
+
+function needsPasswordSetup() {
+  if (!currentSession?.user) return false;
+  return currentSession.user.user_metadata?.password_set !== true;
+}
+
+function validatePassword(password) {
+  const errors = [];
+  if (password.length < 8) errors.push('ít nhất 8 ký tự');
+  if (!/[A-Z]/.test(password)) errors.push('1 chữ hoa');
+  if (!/[a-z]/.test(password)) errors.push('1 chữ thường');
+  if (!/[0-9]/.test(password)) errors.push('1 số');
+  if (!/[^A-Za-z0-9]/.test(password)) errors.push('1 ký tự đặc biệt');
+  return errors;
+}
+
+function renderSetPasswordPage() {
+  if (!currentSession) {
+    setPendingNextRoute('set-password');
+    location.hash = '#login?next=set-password';
+    return;
+  }
+
+  app.innerHTML = `
+    <section class="auth-shell single">
+      <div class="auth-panel auth-form-card">
+        <span class="badge green">Email đã xác thực</span>
+        <h1>Đặt mật khẩu bảo mật</h1>
+        <p class="muted">Email: <b>${escapeHTML(currentSession.user.email)}</b></p>
+        <p class="muted">Mật khẩu giúp bạn đăng nhập nhanh ở các lần sau. Mật khẩu được Supabase Auth quản lý, project không tự lưu mật khẩu trong database.</p>
+
+        <div class="field"><label>Mật khẩu mới</label><input id="newPassword" type="password" autocomplete="new-password" placeholder="Ít nhất 8 ký tự"></div>
+        <div class="field"><label>Nhập lại mật khẩu</label><input id="confirmPassword" type="password" autocomplete="new-password" placeholder="Nhập lại mật khẩu"></div>
+        <div class="password-hint">Yêu cầu: 8+ ký tự, chữ hoa, chữ thường, số và ký tự đặc biệt.</div>
+        <button id="setPasswordSubmit" class="btn primary full" style="margin-top:14px">Lưu mật khẩu</button>
+        <div id="setPasswordResult"></div>
+      </div>
+    </section>
+  `;
+
+  document.getElementById('setPasswordSubmit')?.addEventListener('click', setPasswordUI);
+}
+
+async function setPasswordUI() {
+  const password = document.getElementById('newPassword')?.value || '';
+  const confirm = document.getElementById('confirmPassword')?.value || '';
+  const result = document.getElementById('setPasswordResult');
+
+  const errors = validatePassword(password);
+  if (errors.length) {
+    result.innerHTML = `<div class="state-box error">Mật khẩu cần có: ${errors.join(', ')}.</div>`;
+    return;
+  }
+  if (password !== confirm) {
+    result.innerHTML = `<div class="state-box error">Mật khẩu nhập lại không khớp.</div>`;
+    return;
+  }
+
+  result.innerHTML = `<div class="state-box empty">Đang lưu mật khẩu...</div>`;
+  const { data, error } = await supabaseAuth.auth.updateUser({
+    password,
+    data: { password_set: true }
+  });
+
+  if (error) {
+    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}</div>`;
+    return;
+  }
+
+  currentSession = { ...currentSession, user: data.user || currentSession.user };
+  await syncCurrentUserProfile({ password_set: true });
+  renderAuthHeader();
+  showToast('Đã đặt mật khẩu thành công.');
+
+  const pending = consumePendingNextRoute() || 'dashboard';
+  location.hash = routes[pending] ? `#${pending}` : '#dashboard';
+}
+
+async function syncCurrentUserProfile(extra = {}) {
+  if (!supabaseAuth || !currentSession?.user) return;
+  const user = currentSession.user;
+  try {
+    await supabaseAuth.from('user_profiles').upsert({
+      user_id: user.id,
+      email: user.email,
+      full_name: user.user_metadata?.full_name || null,
+      password_set: user.user_metadata?.password_set === true || extra.password_set === true,
+      last_login_at: new Date().toISOString()
+    }, { onConflict: 'user_id' });
+  } catch (error) {
+    console.warn('Không sync được user_profiles. Hãy chạy SQL tạo bảng user_profiles nếu cần:', error.message);
+  }
+}
+
+function renderAccountPage() {
+  if (!currentSession) {
+    location.hash = '#login?next=account';
+    return;
+  }
+
+  const email = currentSession.user.email;
+  const passwordSet = !needsPasswordSetup();
+  app.innerHTML = `
+    <section class="page-head"><div><span class="eyebrow">Tài khoản</span><h1>Bảo mật và dữ liệu cá nhân</h1><p class="lead">Mọi dữ liệu cá nhân được lưu theo <code>user_id</code> trong Supabase và được RLS chặn không cho user khác xem.</p></div></section>
+    <section class="grid two">
+      <div class="card">
+        <h3>Thông tin đăng nhập</h3>
+        <p><strong>Email:</strong> ${escapeHTML(email)}</p>
+        <p><strong>Trạng thái mật khẩu:</strong> ${passwordSet ? 'Đã thiết lập' : 'Chưa thiết lập'}</p>
+        <a class="btn ${passwordSet ? 'secondary' : 'primary'}" href="#set-password">${passwordSet ? 'Đổi mật khẩu' : 'Đặt mật khẩu ngay'}</a>
+      </div>
+      <div class="card">
+        <h3>Dữ liệu gắn với tài khoản</h3>
+        <ul class="report-list">
+          <li><code>user_profiles</code>: hồ sơ tài khoản.</li>
+          <li><code>ai_analysis_history</code>: lịch sử hỏi AI theo user.</li>
+          <li><code>demo_trades</code>: giao dịch demo theo user.</li>
+          <li><code>alert_rules</code>: cảnh báo email theo user.</li>
+          <li><code>orders</code> và <code>subscriptions</code>: gói thanh toán theo user.</li>
+        </ul>
+      </div>
+    </section>
+  `;
+}
+
+function renderSettlementPage() {
+  app.innerHTML = `
+    <section class="page-head"><div><span class="eyebrow">Thực nhận</span><h1>Gộp P2P + Thuế trong một phép tính</h1><p class="lead">Trang này gọi API mới <code>/api/net-settlement</code> để tính giá áp dụng, thuế, thực nhận và so sánh với nguồn giá còn lại.</p></div></section>
+    <section class="card">
+      <div class="form-grid">
+        <div class="field"><label>Chiều giao dịch</label><select id="settleSide"><option value="sell">Bán USDT lấy VNĐ</option><option value="buy">Mua USDT bằng VNĐ</option></select></div>
+        <div class="field"><label>Số lượng</label><input id="settleAmount" type="number" min="1" value="100000000"></div>
+        <div class="field"><label>Đơn vị</label><select id="settleUnit"><option value="vnd">VNĐ</option><option value="usdt">USDT</option></select></div>
+        <div class="field"><label>Nguồn giá áp dụng</label><select id="settlePriceSource"><option value="p2p">Giá P2P</option><option value="market">Giá sàn quốc tế</option></select></div>
+        <div class="field"><label>Quốc gia tính thuế</label><select id="settleCountry"><option value="VN">Việt Nam</option><option value="US">Hoa Kỳ</option></select></div>
+        <div class="field"><label>Số ngày nắm giữ (US)</label><input id="settleHolding" type="number" min="0" value="0"></div>
+      </div>
+      <button id="settleSubmit" class="btn primary" style="margin-top:14px">Tính thực nhận</button>
+      <div id="settleResult"></div>
+    </section>`;
+  document.getElementById('settleSubmit').addEventListener('click', calculateSettlement);
+}
+
+async function calculateSettlement() {
+  const result = document.getElementById('settleResult');
+  const amount = Number(document.getElementById('settleAmount').value);
+  if (!amount || amount <= 0) { result.innerHTML = `<div class="state-box error">Số lượng phải lớn hơn 0.</div>`; return; }
+  const qs = new URLSearchParams({
+    amount: String(amount),
+    unit: document.getElementById('settleUnit').value,
+    side: document.getElementById('settleSide').value,
+    price_source: document.getElementById('settlePriceSource').value,
+    country: document.getElementById('settleCountry').value,
+    holding_days: document.getElementById('settleHolding').value || '0'
+  });
+  result.innerHTML = `<div class="result-panel"><div class="skeleton" style="height:180px"></div></div>`;
+  try {
+    const res = await fetchJson(`/api/net-settlement?${qs.toString()}`);
+    result.innerHTML = settlementResultHTML(res.data, res.source);
+  } catch (error) { result.innerHTML = errorBox(error.message); }
+}
+
+function settlementResultHTML(data, source = 'api') {
+  const diff = data.comparison?.difference_vnd || 0;
+  const diffText = Math.abs(diff) < 1 ? 'Hai nguồn giá gần như tương đương.' : (diff > 0
+    ? `Nếu dùng ${data.comparison.alt_price_source === 'market' ? 'giá sàn quốc tế' : 'giá P2P'} thay vì lựa chọn hiện tại, bạn sẽ được THÊM ${formatVND(diff)}.`
+    : `Lựa chọn hiện tại tốt hơn nguồn giá còn lại khoảng ${formatVND(Math.abs(diff))}.`);
+  return `
+    <div class="result-panel settlement-result">
+      <span class="badge blue">Kết quả thực nhận</span> ${sourcePill(source)}
+      ${(data.warnings || []).map(w => `<div class="state-box error" style="margin-top:12px">${escapeHTML(w)}</div>`).join('')}
+      <div class="breakdown">
+        <div><span>Giá áp dụng</span><strong>${formatVND(data.applied_price)} / USDT</strong><small>Nguồn: ${data.price_source.toUpperCase()} · cập nhật ${data.applied_price_age_minutes ?? '—'} phút trước</small></div>
+        <div><span>Giá trị trước thuế</span><strong>${formatVND(data.gross_amount_vnd)}</strong><small>${formatNumber(data.amount_usdt, 6)} USDT</small></div>
+        <div><span>Thuế (${data.tax.country} ${formatPct(data.tax.tax_rate_pct, 3, false)})</span><strong>${formatVND(data.tax.tax_amount)}</strong><small>${escapeHTML(data.tax.note || '')}</small></div>
+        <div class="total"><span>THỰC NHẬN</span><strong>${formatVND(data.net_amount_vnd)}</strong><small>${escapeHTML(data.tax.disclaimer || '')}</small></div>
+      </div>
+      <div class="result-panel"><strong>So sánh:</strong> ${diffText}</div>
+    </div>`;
+}
+
+function renderAboutPage() {
+  app.innerHTML = `
+    <section class="page-head"><div><span class="eyebrow">Về dữ liệu</span><h1>Nguồn dữ liệu và độ tin cậy</h1><p class="lead">Trang này giải thích dữ liệu đổ từ đâu vào hệ thống và vì sao cần kiểm tra độ tươi dữ liệu khi ra quyết định.</p></div></section>
+    <section class="grid two">
+      <div class="card"><h3>Nguồn dữ liệu</h3><ul class="report-list"><li>OHLCV BTC/USDT: Binance public API.</li><li>P2P USDT/VNĐ: Binance P2P API, có fallback API Render cũ.</li><li>Tỷ giá tham chiếu: market_price trong bảng P2P hoặc fallback USD/VND.</li><li>AI Advisor: Groq/Gemini/OpenAI tuỳ cấu hình backend .env.</li></ul></div>
+      <div class="card"><h3>Pipeline cập nhật</h3><ul class="report-list"><li><code>scripts/sync_market_data.py</code> lấy dữ liệu mới.</li><li>Script tự tính RSI, MACD, EMA, Bollinger, ATR.</li><li>Dữ liệu được upsert vào Supabase.</li><li>GitHub Actions/cron chạy mỗi giờ để tự động hoá.</li></ul></div>
+      <div class="card"><h3>Độ tin cậy dữ liệu</h3><p>Badge trên các trang cho biết dữ liệu cập nhật bao lâu trước. Nếu dữ liệu quá cũ, hệ thống đổi màu cam/đỏ để cảnh báo.</p></div>
+      <div class="card"><h3>Miễn trừ trách nhiệm</h3><p>Đây là dự án học thuật môn Công nghệ dịch vụ tài chính, không phải khuyến nghị đầu tư, pháp lý hoặc thuế chuyên nghiệp.</p></div>
+    </section>`;
+}
+
+function renderAlertsPage() {
+  app.innerHTML = `
+    <section class="page-head"><div><span class="eyebrow">Cảnh báo Email</span><h1>Đặt điều kiện cảnh báo giá, RSI, P2P spread</h1><p class="lead">Backend kiểm tra rule sau mỗi lần pipeline chạy và gửi email qua Resend nếu điều kiện đạt.</p></div></section>
+    <section class="split">
+      <div class="card">
+        <div class="form-grid" style="grid-template-columns:1fr">
+          <div class="field"><label>Metric</label><select id="alertMetric"><option value="price">Giá BTC</option><option value="rsi">RSI</option><option value="p2p_spread_sell">P2P Spread SELL</option><option value="p2p_spread_buy">P2P Spread BUY</option></select></div>
+          <div class="field"><label>Điều kiện</label><select id="alertOperator"><option value="gt">Lớn hơn</option><option value="lt">Nhỏ hơn</option></select></div>
+          <div class="field"><label>Ngưỡng</label><input id="alertThreshold" type="number" step="0.01" placeholder="VD: 65000 hoặc 70"></div>
+        </div>
+        <button id="alertCreate" class="btn primary full" style="margin-top:14px">Tạo cảnh báo</button>
+        <div class="meta">Giới hạn 5 rule đang bật/tài khoản để tránh spam email.</div>
+      </div>
+      <div class="card"><h3>Rule hiện có</h3><div id="alertList">${loadingCard(220)}</div></div>
+    </section>`;
+  document.getElementById('alertCreate').addEventListener('click', createAlertRuleUI);
+  loadAlertsUI();
+}
+
+async function createAlertRuleUI() {
+  const threshold = Number(document.getElementById('alertThreshold').value);
+  if (!Number.isFinite(threshold)) { showToast('Vui lòng nhập ngưỡng hợp lệ.'); return; }
+  try {
+    await fetchJson('/api/alerts', { method: 'POST', body: { metric: document.getElementById('alertMetric').value, operator: document.getElementById('alertOperator').value, threshold, active: true } });
+    showToast('Đã đặt cảnh báo, hệ thống kiểm tra tự động mỗi giờ.');
+    await loadAlertsUI();
+  } catch (error) { showToast(error.message); }
+}
+
+async function loadAlertsUI() {
+  const box = document.getElementById('alertList');
+  if (!box) return;
+  try {
+    const res = await fetchJson('/api/alerts');
+    const rows = res.data.data || [];
+    box.innerHTML = rows.length ? rows.map(r => `<div class="order-row"><div><strong>${escapeHTML(r.metric)}</strong><div class="meta">${r.operator} ${formatNumber(Number(r.threshold), 3)} · ${r.active ? 'Đang bật' : 'Đã tắt'}</div></div><div><button class="btn small secondary" data-alert-toggle="${r.id}" data-active="${r.active}">${r.active ? 'Tắt' : 'Bật'}</button><button class="btn small danger" data-alert-delete="${r.id}">Xóa</button></div></div>`).join('') : `<div class="state-box empty">Chưa có cảnh báo.</div>`;
+    document.querySelectorAll('[data-alert-toggle]').forEach(btn => btn.addEventListener('click', async () => { await fetchJson(`/api/alerts/${btn.dataset.alertToggle}`, { method: 'PATCH', body: { active: btn.dataset.active !== 'true' } }); loadAlertsUI(); }));
+    document.querySelectorAll('[data-alert-delete]').forEach(btn => btn.addEventListener('click', async () => { await fetchJson(`/api/alerts/${btn.dataset.alertDelete}`, { method: 'DELETE' }); loadAlertsUI(); }));
+  } catch (error) { box.innerHTML = errorBox(error.message); }
+}
+
+function renderBillingPage() {
+  app.innerHTML = `
+    <section class="page-head"><div><span class="eyebrow">VNPay Sandbox</span><h1>Mua gói Premium thử nghiệm</h1><p class="lead">Đây là môi trường thử nghiệm Sandbox của VNPay — dùng để minh hoạ, không phát sinh tiền thật.</p></div></section>
+    <section class="grid two">
+      <div class="card"><span class="badge neutral">Free</span><h2>Gói miễn phí</h2><p>Dashboard, P2P, thuế và chat AI cơ bản.</p></div>
+      <div class="card"><span class="badge violet">Premium Sandbox</span><h2>49.000đ/tháng</h2><p>Cảnh báo nâng cao, lịch sử sâu, nhiều kịch bản AI hơn.</p><button id="buyPremium" class="btn primary full" style="margin-top:14px">Nâng cấp qua VNPay Sandbox</button></div>
+    </section>`;
+  document.getElementById('buyPremium').addEventListener('click', async () => {
+    try {
+      const res = await fetchJson('/api/payment/create', { method: 'POST', body: { plan_id: 'premium_monthly' } });
+      window.location.href = res.data.payment_url;
+    } catch (error) { showToast(error.message); }
+  });
+}
+
+async function renderPaymentResultPage() {
+  const params = new URLSearchParams((location.hash.split('?')[1] || ''));
+  const txnRef = params.get('txn_ref');
+  app.innerHTML = `<section class="page-head"><div><span class="eyebrow">Kết quả thanh toán</span><h1>VNPay Sandbox</h1><p class="lead">Frontend không tự tin URL trả về; nó gọi backend để đọc trạng thái đơn hàng mới nhất.</p></div></section><section id="paymentResult">${loadingCard(180)}</section>`;
+  const box = document.getElementById('paymentResult');
+  if (!txnRef) { box.innerHTML = `<div class="state-box error">Thiếu mã giao dịch.</div>`; return; }
+  try {
+    const res = await fetchJson(`/api/payment/status?txn_ref=${encodeURIComponent(txnRef)}`);
+    const status = res.data.status;
+    box.innerHTML = `<div class="card"><span class="badge ${status === 'success' ? 'green' : status === 'failed' ? 'red' : 'amber'}">${status}</span><h2>Đơn hàng ${escapeHTML(txnRef)}</h2><p>Gói: ${escapeHTML(res.data.plan_id)} · Số tiền: ${formatVND(res.data.amount_vnd)}</p><p>Sandbox VNPay — không phải tiền thật.</p></div>`;
+  } catch (error) { box.innerHTML = errorBox(error.message); }
 }

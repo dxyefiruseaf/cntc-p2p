@@ -66,7 +66,7 @@ async def call_ai_provider(prompt: str, system_prompt: str) -> str | None:
     model = settings.ai_model
 
     if provider == "gemini" and settings.gemini_api_key:
-        return await _call_gemini(prompt, system_prompt, settings.gemini_api_key, model or "gemini-1.5-flash")
+        return await _call_gemini(prompt, system_prompt, settings.gemini_api_key, model or "gemini-2.5-flash-lite")
     if provider == "groq" and settings.groq_api_key:
         return await _call_openai_compatible(
             prompt,
