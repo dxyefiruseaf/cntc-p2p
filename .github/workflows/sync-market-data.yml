@@ -1,0 +1,37 @@
+name: Sync Market Data to Supabase
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Chạy mỗi giờ. GitHub Actions dùng UTC.
+    - cron: "0 * * * *"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync market data
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PUBLIC_DATA_API_URL: ${{ vars.PUBLIC_DATA_API_URL || 'https://btc-bigdata-is55a.onrender.com' }}
+          SYNC_SOURCE: ${{ vars.SYNC_SOURCE || 'public_api' }}
+          SYNC_HOURS: ${{ vars.SYNC_HOURS || '720' }}
+          SYNC_P2P_FROM_BINANCE: ${{ vars.SYNC_P2P_FROM_BINANCE || 'true' }}
+          SYNC_P2P_PUBLIC_FALLBACK: ${{ vars.SYNC_P2P_PUBLIC_FALLBACK || 'true' }}
+          FALLBACK_USD_VND_RATE: ${{ vars.FALLBACK_USD_VND_RATE || '26000' }}
+        run: python scripts/sync_market_data.py

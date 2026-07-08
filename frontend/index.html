@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="vi">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BTC BigData AI Advisor — Business Canvas Demo</title>
+  <meta name="description"
+    content="Website minh chứng Chương 1-3: mô hình kinh doanh, Business Model Canvas và thử nghiệm nền tảng BTC BigData tích hợp AI." />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
+    rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="/assets/mock-data.js"></script>
+  <script type="module" src="/src/main.js"></script>
+</head>
+
+<body>
+  <header class="topbar">
+    <a class="brand" href="#business" aria-label="BTC BigData">
+      <span class="brand-mark">₿</span>
+      <span>
+        <strong>BTC BigData</strong>
+        <small>AI Advisor</small>
+      </span>
+    </a>
+
+    <nav id="mainNav" class="top-nav" aria-label="Điều hướng chính">
+      <a href="#business" data-route="business">Chương 1</a>
+      <a href="#bmc" data-route="bmc">Chương 2 · BMC</a>
+      <a href="#experiment" data-route="experiment">Chương 3</a>
+      <a href="#dashboard" data-route="dashboard">Dashboard</a>
+      <a href="#p2p" data-route="p2p">P2P</a>
+      <a href="#tax" data-route="tax">Thuế</a>
+      <a href="#chat" data-route="chat">Chat AI</a>
+    </nav>
+
+    <div class="top-actions">
+      <button id="topTicker" class="ticker-pill" type="button" title="Giá BTC/USDT mới nhất">BTC/USDT&nbsp;<strong>Đang
+          tải</strong></button>
+      <a class="btn small primary" href="#experiment">Demo</a>
+      <button id="menuToggle" class="menu-toggle" aria-label="Mở menu">☰</button>
+    </div>
+  </header>
+
+  <aside id="sideNav" class="side-nav" aria-label="Sidebar">
+    <div class="side-head">
+      <strong>BTC BigData</strong>
+      <span>Business Canvas + AI Demo</span>
+    </div>
+    <a href="#business" data-route="business"><span>①</span>Đề xuất mô hình</a>
+    <a href="#bmc" data-route="bmc"><span>②</span>Business Model Canvas</a>
+    <a href="#experiment" data-route="experiment"><span>③</span>Thử nghiệm mô hình</a>
+    <div class="side-label">Nền tảng minh chứng</div>
+    <a href="#dashboard" data-route="dashboard"><span>▦</span>Dashboard</a>
+    <a href="#chart" data-route="chart"><span>▥</span>Biểu đồ kỹ thuật</a>
+    <a href="#p2p" data-route="p2p"><span>⟳</span>P2P Spread</a>
+    <a href="#tax" data-route="tax"><span>▣</span>Ước tính thuế</a>
+    <a href="#chat" data-route="chat"><span>🤖</span>Chat AI</a>
+    <a href="#trade" data-route="trade"><span>↔</span>Giao dịch demo</a>
+    <a href="#history" data-route="history"><span>◷</span>Lịch sử AI</a>
+  </aside>
+
+  <main id="app" class="app-shell" tabindex="-1"></main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <footer class="site-footer">
+    <strong>BTC BigData AI Advisor</strong>
+    <span>Website bài tập lớn Công nghệ dịch vụ tài chính · Dữ liệu chỉ mang tính tham khảo.</span>
+  </footer>
+</body>
+
+</html>
