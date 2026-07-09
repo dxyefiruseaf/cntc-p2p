@@ -6,12 +6,12 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 const supabaseAuth = SUPABASE_URL && SUPABASE_ANON_KEY
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: true
-      }
-    })
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true
+    }
+  })
   : null;
 const VN_TZ = 'Asia/Ho_Chi_Minh';
 const app = document.getElementById('app');
@@ -42,6 +42,7 @@ const signalMap = {
 };
 
 const routes = {
+  theory: renderTheoryPage,
   business: renderBusinessPage,
   bmc: renderBMCPage,
   experiment: renderExperimentPage,
@@ -83,9 +84,9 @@ setInterval(refreshTopTicker, 60_000);
 
 function route() {
   disposeCharts();
-  const raw = (location.hash || '#business').replace('#', '');
+  const raw = (location.hash || '#theory').replace('#', '');
   const name = raw.split('?')[0] || 'business';
-  activeRoute = routes[name] ? name : 'business';
+  activeRoute = routes[name] ? name : 'theory';
   if (protectedRoutes.has(activeRoute)) {
     if (!authReady) {
       app.innerHTML = loadingCard(160);
@@ -99,6 +100,10 @@ function route() {
     }
   }
   document.querySelectorAll('[data-route]').forEach(el => el.classList.toggle('active', el.dataset.route === activeRoute));
+  document.querySelectorAll('[data-nav-group]').forEach(el => {
+    const routeList = (el.dataset.routes || '').split(',').map(x => x.trim()).filter(Boolean);
+    el.classList.toggle('active', routeList.includes(activeRoute));
+  });
   app.innerHTML = '';
   routes[activeRoute]();
   if (trustRoutes.has(activeRoute)) mountDataTrustBadge();
@@ -210,7 +215,7 @@ async function fetchJson(endpoint, options = {}) {
       try {
         const err = await response.json();
         detail = err.detail || detail;
-      } catch (_) {}
+      } catch (_) { }
       throw new Error(detail);
     }
     return { data: await response.json(), source: 'api' };
@@ -463,6 +468,87 @@ function renderExperimentPage() {
   document.querySelectorAll('[data-demo]').forEach(btn => btn.addEventListener('click', () => runDemo(btn.dataset.demo)));
 }
 
+function renderTheoryPage() {
+  const items = bmcItems();
+  app.innerHTML = `
+    <section class="page-head theory-hero">
+      <div>
+        <span class="eyebrow">Lý thuyết tổng hợp · Chương 1–3</span>
+        <h1>Một trang lý thuyết gọn cho báo cáo BTC BigData AI Advisor</h1>
+        <p class="lead">Ba chương lý thuyết được gom về một trang riêng để người dùng phổ thông không bị rối. Các tính năng sản phẩm nằm trong menu Công cụ và có thể mở khi cần demo.</p>
+      </div>
+      <div class="hero-actions"><a class="btn primary" href="#dashboard">Mở dashboard</a><a class="btn secondary" href="#theory-ch3">Xem thử nghiệm</a></div>
+    </section>
+
+    <nav class="theory-tabs" aria-label="Đi tới chương lý thuyết">
+      <a href="#theory-ch1"><strong>Chương 1</strong><span>Mô hình kinh doanh</span></a>
+      <a href="#theory-ch2"><strong>Chương 2</strong><span>BMC 9 thành phần</span></a>
+      <a href="#theory-ch3"><strong>Chương 3</strong><span>Thử nghiệm MVP</span></a>
+    </nav>
+
+    <section id="theory-ch1" class="section chapter-card">
+      ${sectionHead('Chương 1', 'Đề xuất mô hình kinh doanh', 'Mục tiêu là biến dữ liệu Bitcoin, P2P và thuế thành một trợ lý ra quyết định dễ hiểu bằng tiếng Việt.')}
+      <div class="grid three">
+        <div class="card"><span class="badge blue">Nhu cầu</span><h3>Người dùng cần tín hiệu dễ hiểu</h3><p>Thay vì tự đọc RSI, MACD, EMA, người dùng nhận được diễn giải ngắn gọn: MUA, BÁN hoặc TRUNG LẬP kèm lý do.</p></div>
+        <div class="card"><span class="badge amber">Khác biệt</span><h3>Gộp kỹ thuật + P2P + thuế</h3><p>Không chỉ xem biểu đồ, hệ thống còn tính spread P2P và ước tính số tiền thực nhận khi bán.</p></div>
+        <div class="card"><span class="badge violet">Khả thi</span><h3>MVP chạy thật</h3><p>Frontend Vite, backend FastAPI, Supabase và AI Provider được tách riêng để dễ demo, bảo trì và triển khai.</p></div>
+      </div>
+    </section>
+
+    <section id="theory-ch2" class="section chapter-card">
+      ${sectionHead('Chương 2', 'Business Model Canvas rút gọn', 'Bấm vào từng ô để xem phân tích chi tiết nhưng vẫn nằm trong cùng một trang lý thuyết.')}
+      <div class="canvas-grid compact" id="theoryCanvasGrid">
+        ${items.map(item => `
+          <article class="bmc-block ${item.className}" data-bmc="${item.id}">
+            <h3>${item.title}<span>+</span></h3>
+            <p><strong>${item.vi}</strong></p>
+            <ul>${item.bullets.slice(0, 3).map(b => `<li>${b}</li>`).join('')}</ul>
+          </article>
+        `).join('')}
+      </div>
+      <div id="theoryBmcDetail" class="result-panel"></div>
+    </section>
+
+    <section id="theory-ch3" class="section chapter-card">
+      ${sectionHead('Chương 3', 'Thử nghiệm mô hình và minh chứng kỹ thuật', 'Các nút bên dưới gọi API/logic thật nếu backend hoạt động; khi lỗi sẽ dùng fallback demo để thuyết trình không bị gián đoạn.')}
+      <div class="demo-grid">
+        <div class="card demo-actions">
+          <button class="btn primary full" data-demo="latest">1. Gọi /api/latest</button>
+          <button class="btn secondary full" data-demo="p2p">2. Gọi /api/p2p-spread</button>
+          <button class="btn secondary full" data-demo="tax">3. Tính thuế bán 100 triệu</button>
+          <button class="btn accent full" data-demo="ai">4. Hỏi AI: nên mua hay bán?</button>
+        </div>
+        <div class="card">
+          <h3>Kết quả thử nghiệm</h3>
+          <p id="demoHint">Chưa chạy kịch bản nào. Hãy bấm một nút bên trái.</p>
+          <pre id="apiLog" class="api-log"></pre>
+        </div>
+      </div>
+      <div class="mini-flow section">
+        <div class="flow-step"><b>1</b><h3>Pipeline</h3><p>Thu thập và chuẩn hóa dữ liệu BTC/P2P.</p></div>
+        <div class="flow-step"><b>2</b><h3>Backend</h3><p>FastAPI trả API cho frontend và AI.</p></div>
+        <div class="flow-step"><b>3</b><h3>Frontend</h3><p>Dashboard, biểu đồ, thuế, P2P, chat.</p></div>
+        <div class="flow-step"><b>4</b><h3>AI</h3><p>Diễn giải tín hiệu bằng tiếng Việt.</p></div>
+      </div>
+    </section>
+  `;
+
+  const detail = document.getElementById('theoryBmcDetail');
+  function setDetail(id) {
+    const item = items.find(x => x.id === id) || items[1];
+    document.querySelectorAll('#theoryCanvasGrid .bmc-block').forEach(el => el.classList.toggle('active', el.dataset.bmc === item.id));
+    detail.innerHTML = `
+      <span class="badge amber">Chi tiết BMC</span>
+      <h2 style="margin-top:10px">${item.title} — ${item.vi}</h2>
+      <p>${item.detail}</p>
+      <ul class="report-list">${item.bullets.map(b => `<li>${b}</li>`).join('')}</ul>
+    `;
+  }
+  document.querySelectorAll('#theoryCanvasGrid [data-bmc]').forEach(el => el.addEventListener('click', () => setDetail(el.dataset.bmc)));
+  setDetail('vp');
+  document.querySelectorAll('[data-demo]').forEach(btn => btn.addEventListener('click', () => runDemo(btn.dataset.demo)));
+}
+
 async function runDemo(type) {
   const log = document.getElementById('apiLog');
   const hint = document.getElementById('demoHint');
@@ -514,9 +600,9 @@ async function renderDashboardPage() {
       </div>
       <div class="grid four section">
         ${['RSI', 'MACD', 'Bollinger', 'EMA_Trend'].map(key => {
-          const s = signals[key] || { value: null, signal: 'NEUTRAL', note: 'Chưa có dữ liệu' };
-          return `<div class="card"><h3>${key.replace('_', ' ')}</h3><p>${badge(s.signal)}</p><p style="margin-top:10px">${escapeHTML(s.note)}</p><div class="meta">Giá trị: ${formatNumber(s.value, 2)}</div></div>`;
-        }).join('')}
+      const s = signals[key] || { value: null, signal: 'NEUTRAL', note: 'Chưa có dữ liệu' };
+      return `<div class="card"><h3>${key.replace('_', ' ')}</h3><p>${badge(s.signal)}</p><p style="margin-top:10px">${escapeHTML(s.note)}</p><div class="meta">Giá trị: ${formatNumber(s.value, 2)}</div></div>`;
+    }).join('')}
       </div>
       <div class="card section">
         <div class="section-head"><div><h2>Biến động 24 giờ gần nhất</h2><p>Đường giá đóng cửa dùng để xem nhanh xu hướng trong ngày.</p></div><a class="btn secondary" href="#chart">Xem biểu đồ chi tiết</a></div>
@@ -885,7 +971,7 @@ function tradeRowHTML(o) {
 }
 
 function loadOrders() { return []; }
-function saveOrders() {}
+function saveOrders() { }
 function renderOrderHistory() { renderAccountTradePreview(); }
 
 function drawLineChart(id, data, field, name) {
@@ -1039,7 +1125,7 @@ function setPendingNextRoute(routeName) {
   const safeRoute = routes[routeName] ? routeName : 'dashboard';
   try {
     localStorage.setItem('btc_bigdata_auth_next', safeRoute);
-  } catch (_) {}
+  } catch (_) { }
 }
 
 function consumePendingNextRoute() {
@@ -1167,14 +1253,17 @@ function installAuthUxStyles() {
     /* Floating AI Messenger */
     .floating-ai-button { position:fixed; right:22px; bottom:22px; z-index:95; width:58px; height:58px; border:0; border-radius:999px; background:linear-gradient(135deg,#2563eb,#7c3aed); color:#fff; box-shadow:0 22px 55px rgba(37,99,235,.35); display:grid; place-items:center; font-size:1.35rem; }
     .floating-ai-button .unread-dot { position:absolute; top:8px; right:8px; width:10px; height:10px; border-radius:999px; background:#f59e0b; box-shadow:0 0 0 4px rgba(245,158,11,.22); }
-    .floating-ai-panel { position:fixed; right:22px; bottom:92px; z-index:96; width:min(410px, calc(100vw - 28px)); max-height:min(680px, calc(100vh - 120px)); display:none; grid-template-rows:auto minmax(220px,1fr) auto; overflow:hidden; border:1px solid rgba(148,163,184,.28); border-radius:26px; background:rgba(255,255,255,.98); box-shadow:0 30px 90px rgba(15,23,42,.22); backdrop-filter:blur(16px); }
+    .floating-ai-panel { position:fixed; right:22px; bottom:92px; z-index:96; width:min(390px, calc(100vw - 28px)); max-height:min(560px, calc(100vh - 120px)); display:none; grid-template-rows:auto minmax(180px,1fr) auto; overflow:hidden; border:1px solid rgba(148,163,184,.28); border-radius:24px; background:rgba(255,255,255,.98); box-shadow:0 30px 90px rgba(15,23,42,.22); backdrop-filter:blur(16px); }
     .floating-ai-panel.open { display:grid; }
-    .floating-ai-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 16px; background:linear-gradient(135deg,#0f172a,#1e293b); color:#fff; }
+    .floating-ai-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 14px; background:linear-gradient(135deg,#0f172a,#1e293b); color:#fff; cursor:grab; user-select:none; touch-action:none; }
+    .floating-ai-panel.dragging .floating-ai-head { cursor:grabbing; }
+    .floating-ai-controls { display:flex; align-items:center; gap:6px; }
+    .floating-ai-hint { display:block; color:rgba(255,255,255,.55); font-size:.68rem; font-weight:700; margin-top:2px; }
     .floating-ai-title { display:flex; align-items:center; gap:10px; }
     .floating-ai-avatar { width:38px; height:38px; display:grid; place-items:center; border-radius:16px; background:#f7931a; }
     .floating-ai-title strong { display:block; }
     .floating-ai-title small { display:block; color:rgba(255,255,255,.72); margin-top:1px; }
-    .floating-ai-close { border:0; background:rgba(255,255,255,.12); color:#fff; width:34px; height:34px; border-radius:12px; font-weight:900; }
+    .floating-ai-close, .floating-ai-reset { border:0; background:rgba(255,255,255,.12); color:#fff; width:34px; height:34px; border-radius:12px; font-weight:900; }
     .floating-ai-messages { overflow-y:auto; padding:14px; display:grid; gap:10px; background:linear-gradient(180deg,#f8fafc,#eef2ff); }
     .floating-ai-msg { max-width:86%; padding:10px 12px; border-radius:18px; white-space:pre-wrap; line-height:1.45; font-size:.92rem; box-shadow:0 8px 22px rgba(15,23,42,.06); }
     .floating-ai-msg.ai { justify-self:start; background:#fff; color:#0f172a; border-bottom-left-radius:6px; }
@@ -1237,9 +1326,9 @@ function installFloatingAIChat() {
         <div class="floating-ai-head">
           <div class="floating-ai-title">
             <div class="floating-ai-avatar">₿</div>
-            <div><strong>AI Advisor</strong><small>Hỏi nhanh khi đang xem dữ liệu</small></div>
+            <div><strong>AI Advisor</strong><small>Hỏi nhanh khi đang xem dữ liệu</small><span class="floating-ai-hint">Kéo thanh này để di chuyển</span></div>
           </div>
-          <button id="floatingAIClose" class="floating-ai-close" type="button" aria-label="Đóng chat">×</button>
+          <div class="floating-ai-controls"><button id="floatingAIReset" class="floating-ai-reset" type="button" title="Đưa chat về góc phải" aria-label="Đưa chat về góc phải">↺</button><button id="floatingAIClose" class="floating-ai-close" type="button" aria-label="Thu gọn chat">−</button></div>
         </div>
         <div id="floatingAIMessages" class="floating-ai-messages"></div>
         <div class="floating-ai-quick">
@@ -1257,10 +1346,14 @@ function installFloatingAIChat() {
 
   const button = document.getElementById('floatingAIButton');
   const close = document.getElementById('floatingAIClose');
+  const reset = document.getElementById('floatingAIReset');
   const form = document.getElementById('floatingAIForm');
+  setupFloatingAIDrag();
+  restoreFloatingAIPosition();
 
   button?.addEventListener('click', () => toggleFloatingAI());
   close?.addEventListener('click', () => toggleFloatingAI(false));
+  reset?.addEventListener('click', resetFloatingAIPosition);
   form?.addEventListener('submit', event => {
     event.preventDefault();
     sendFloatingAIMessage();
@@ -1272,6 +1365,80 @@ function installFloatingAIChat() {
   }));
 
   renderFloatingAIMessages();
+}
+
+function getFloatingAIPositionStoreKey() {
+  return 'btc_bigdata_floating_ai_position';
+}
+
+function clampFloatingAIPosition(x, y) {
+  const panel = document.getElementById('floatingAIPanel');
+  if (!panel) return { x, y };
+  const rect = panel.getBoundingClientRect();
+  const margin = 10;
+  const width = rect.width || 390;
+  const height = rect.height || 520;
+  return {
+    x: Math.max(margin, Math.min(x, window.innerWidth - width - margin)),
+    y: Math.max(margin + 68, Math.min(y, window.innerHeight - height - margin))
+  };
+}
+
+function applyFloatingAIPosition(x, y) {
+  const panel = document.getElementById('floatingAIPanel');
+  if (!panel) return;
+  const pos = clampFloatingAIPosition(x, y);
+  panel.style.left = `${pos.x}px`;
+  panel.style.top = `${pos.y}px`;
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+}
+
+function restoreFloatingAIPosition() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(getFloatingAIPositionStoreKey()) || 'null');
+    if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) applyFloatingAIPosition(saved.x, saved.y);
+  } catch (_) { }
+}
+
+function resetFloatingAIPosition() {
+  const panel = document.getElementById('floatingAIPanel');
+  if (!panel) return;
+  panel.style.left = '';
+  panel.style.top = '';
+  panel.style.right = '22px';
+  panel.style.bottom = '92px';
+  localStorage.removeItem(getFloatingAIPositionStoreKey());
+}
+
+function setupFloatingAIDrag() {
+  const panel = document.getElementById('floatingAIPanel');
+  const head = panel?.querySelector('.floating-ai-head');
+  if (!panel || !head || panel.dataset.dragReady === '1') return;
+  panel.dataset.dragReady = '1';
+
+  let start = null;
+  head.addEventListener('pointerdown', event => {
+    if (event.target.closest('button, input, a')) return;
+    const rect = panel.getBoundingClientRect();
+    start = { pointerId: event.pointerId, dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+    panel.classList.add('dragging');
+    head.setPointerCapture?.(event.pointerId);
+  });
+  head.addEventListener('pointermove', event => {
+    if (!start || event.pointerId !== start.pointerId) return;
+    applyFloatingAIPosition(event.clientX - start.dx, event.clientY - start.dy);
+  });
+  function stopDrag(event) {
+    if (!start || event.pointerId !== start.pointerId) return;
+    const rect = panel.getBoundingClientRect();
+    localStorage.setItem(getFloatingAIPositionStoreKey(), JSON.stringify({ x: rect.left, y: rect.top }));
+    panel.classList.remove('dragging');
+    start = null;
+  }
+  head.addEventListener('pointerup', stopDrag);
+  head.addEventListener('pointercancel', stopDrag);
+  window.addEventListener('resize', restoreFloatingAIPosition);
 }
 
 function toggleFloatingAI(forceOpen) {

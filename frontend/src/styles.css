@@ -556,3 +556,131 @@ tr:last-child td { border-bottom: 0; }
 .btn.danger { background: var(--red-soft); color: var(--red); border-color:#fecaca; }
 .btn.full { width:100%; justify-content:center; }
 @media (max-width: 980px) { .auth-box { display:none; } }
+
+/* Navigation dropdown: gom chức năng phụ để giao diện người dùng phổ thông gọn hơn. */
+.nav-dropdown {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.nav-drop-btn {
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: .9rem;
+  font-weight: 760;
+  padding: 0 .72rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-dropdown:hover .nav-drop-btn,
+.nav-dropdown:focus-within .nav-drop-btn,
+.nav-dropdown.active .nav-drop-btn {
+  color: var(--text);
+}
+.nav-drop-btn span { font-size: .72rem; }
+.nav-dropdown-menu {
+  position: absolute;
+  top: calc(100% - 10px);
+  left: 0;
+  z-index: 90;
+  min-width: 220px;
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+  border: 1px solid rgba(226, 232, 240, .92);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, .98);
+  box-shadow: var(--shadow);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(8px);
+  transition: .16s ease;
+}
+.nav-dropdown:hover .nav-dropdown-menu,
+.nav-dropdown:focus-within .nav-dropdown-menu {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+.top-nav .nav-dropdown-menu a {
+  height: auto;
+  min-height: 40px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: .86rem;
+}
+.top-nav .nav-dropdown-menu a::after { display: none; }
+.top-nav .nav-dropdown-menu a:hover,
+.top-nav .nav-dropdown-menu a.active {
+  background: var(--neutral-soft);
+}
+
+.theory-hero {
+  background:
+    radial-gradient(circle at 0% 0%, rgba(247, 147, 26, .14), transparent 18rem),
+    linear-gradient(135deg, #fff, #f8fafc);
+}
+.theory-tabs {
+  position: sticky;
+  top: calc(var(--topbar) + 10px);
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0 0;
+  padding: 8px;
+  border: 1px solid rgba(226, 232, 240, .9);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, .86);
+  backdrop-filter: blur(16px);
+  box-shadow: var(--shadow-sm);
+}
+.theory-tabs a {
+  display: grid;
+  gap: 2px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: var(--card-soft);
+  border: 1px solid transparent;
+}
+.theory-tabs a:hover {
+  background: #fff;
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.theory-tabs strong { font-size: .92rem; }
+.theory-tabs span { color: var(--muted); font-size: .78rem; font-weight: 700; }
+.chapter-card {
+  scroll-margin-top: calc(var(--topbar) + 90px);
+  padding: 22px;
+  border: 1px solid rgba(226, 232, 240, .9);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, .72);
+  box-shadow: var(--shadow-sm);
+}
+.canvas-grid.compact {
+  gap: 12px;
+}
+.canvas-grid.compact .bmc-block {
+  min-height: 170px;
+  padding: 16px;
+}
+.canvas-grid.compact .bmc-block h3 {
+  font-size: .95rem;
+}
+.canvas-grid.compact .bmc-block li {
+  font-size: .82rem;
+}
+
+@media (max-width: 980px) {
+  .top-nav {
+    display: none;
+  }
+}
+@media (max-width: 760px) {
+  .theory-tabs { grid-template-columns: 1fr; position: static; }
+  .chapter-card { padding: 16px; border-radius: 22px; }
+}

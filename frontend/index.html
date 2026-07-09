@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BTC BigData AI Advisor — Business Canvas Demo</title>
+  <title>BTC BigData AI Advisor — Dashboard & Lý thuyết</title>
   <meta name="description"
     content="Website minh chứng Chương 1-3: mô hình kinh doanh, Business Model Canvas và thử nghiệm nền tảng BTC BigData tích hợp AI." />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -19,7 +19,7 @@
 
 <body>
   <header class="topbar">
-    <a class="brand" href="#business" aria-label="BTC BigData">
+    <a class="brand" href="#theory" aria-label="BTC BigData">
       <span class="brand-mark">₿</span>
       <span>
         <strong>BTC BigData</strong>
@@ -28,21 +28,37 @@
     </a>
 
     <nav id="mainNav" class="top-nav" aria-label="Điều hướng chính">
-      <a href="#business" data-route="business">Chương 1</a>
-      <a href="#bmc" data-route="bmc">Chương 2 · BMC</a>
-      <a href="#experiment" data-route="experiment">Chương 3</a>
+      <a href="#theory" data-route="theory">Lý thuyết 1–3</a>
       <a href="#dashboard" data-route="dashboard">Dashboard</a>
-      <a href="#p2p" data-route="p2p">P2P</a>
-      <a href="#tax" data-route="tax">Thuế</a>
-      <a href="#settlement" data-route="settlement">Thực nhận</a>
-      <a href="#chat" data-route="chat">Chat AI</a>
+      <div class="nav-dropdown" data-nav-group="tools" data-routes="chart,p2p,tax,settlement,chat,trade,about">
+        <button type="button" class="nav-drop-btn" aria-haspopup="true">Công cụ <span>▾</span></button>
+        <div class="nav-dropdown-menu" role="menu">
+          <a href="#chart" data-route="chart">Biểu đồ kỹ thuật</a>
+          <a href="#p2p" data-route="p2p">P2P Spread</a>
+          <a href="#tax" data-route="tax">Ước tính thuế</a>
+          <a href="#settlement" data-route="settlement">Tính thực nhận</a>
+          <a href="#chat" data-route="chat">Chat AI</a>
+          <a href="#trade" data-route="trade">Giao dịch demo</a>
+          <a href="#about" data-route="about">Về dữ liệu</a>
+        </div>
+      </div>
+      <div class="nav-dropdown" data-nav-group="account" data-routes="login,account,history,alerts,billing,set-password,payment-result">
+        <button type="button" class="nav-drop-btn" aria-haspopup="true">Tài khoản <span>▾</span></button>
+        <div class="nav-dropdown-menu" role="menu">
+          <a href="#login" data-route="login">Đăng nhập</a>
+          <a href="#account" data-route="account">Tài khoản</a>
+          <a href="#history" data-route="history">Lịch sử cá nhân</a>
+          <a href="#alerts" data-route="alerts">Cảnh báo Email</a>
+          <a href="#billing" data-route="billing">Mua gói Sandbox</a>
+        </div>
+      </div>
     </nav>
 
     <div class="top-actions">
       <div id="authBox" class="auth-box"></div>
       <button id="topTicker" class="ticker-pill" type="button" title="Giá BTC/USDT mới nhất">BTC/USDT&nbsp;<strong>Đang
           tải</strong></button>
-      <a class="btn small primary" href="#experiment">Demo</a>
+      <a class="btn small primary" href="#dashboard">Demo</a>
       <button id="menuToggle" class="menu-toggle" aria-label="Mở menu">☰</button>
     </div>
   </header>
@@ -52,9 +68,7 @@
       <strong>BTC BigData</strong>
       <span>Business Canvas + AI Demo</span>
     </div>
-    <a href="#business" data-route="business"><span>①</span>Đề xuất mô hình</a>
-    <a href="#bmc" data-route="bmc"><span>②</span>Business Model Canvas</a>
-    <a href="#experiment" data-route="experiment"><span>③</span>Thử nghiệm mô hình</a>
+    <a href="#theory" data-route="theory"><span>☰</span>Lý thuyết 1–3</a>
     <div class="side-label">Nền tảng minh chứng</div>
     <a href="#dashboard" data-route="dashboard"><span>▦</span>Dashboard</a>
     <a href="#chart" data-route="chart"><span>▥</span>Biểu đồ kỹ thuật</a>
@@ -75,7 +89,7 @@
 
   <footer class="site-footer">
     <strong>BTC BigData AI Advisor</strong>
-    <span>Website bài tập lớn Công nghệ dịch vụ tài chính · <a href="#about">Về dữ liệu</a> · Dữ liệu chỉ mang tính tham khảo.</span>
+    <span>Công nghệ dịch vụ tài chính · <a href="#about">Về dữ liệu</a> · Dữ liệu chỉ mang tính tham khảo.</span>
   </footer>
 </body>
 
