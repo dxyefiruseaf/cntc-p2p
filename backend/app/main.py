@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import admin, ai, alerts, demo_trades, market, payment, settlement, tax
+from app.routers import admin, ai, alerts, demo_trades, market, news, payment, settlement, tax
 
 settings = get_settings()
 
@@ -40,6 +40,7 @@ def root():
             "/api/risk-score",
             "/api/market-alerts",
             "/api/p2p-comparison",
+            "/api/news/latest",
             "/api/ai/ask",
             "/api/ai/history?limit=24",
         ],
@@ -52,6 +53,7 @@ def health():
 
 
 app.include_router(market.router)
+app.include_router(news.router)
 app.include_router(tax.router)
 app.include_router(settlement.router)
 app.include_router(ai.router)

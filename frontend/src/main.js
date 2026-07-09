@@ -33,7 +33,7 @@ let orders = [];
 let currentSession = null;
 let authReady = !supabaseAuth;
 const protectedRoutes = new Set(['history', 'alerts', 'billing', 'set-password', 'account']);
-const trustRoutes = new Set(['dashboard', 'chart', 'p2p', 'tax', 'settlement', 'chat', 'risk', 'reliability']);
+const trustRoutes = new Set(['dashboard', 'chart', 'p2p', 'tax', 'settlement', 'chat', 'risk', 'news', 'reliability']);
 
 const signalMap = {
   BUY: { vi: 'MUA', className: 'buy', icon: '↗' },
@@ -50,6 +50,7 @@ const routes = {
   chart: renderChartPage,
   p2p: renderP2PPage,
   risk: renderRiskPage,
+  news: renderNewsPage,
   reliability: renderReliabilityPage,
   guide: renderIndicatorGuidePage,
   tax: renderTaxPage,
@@ -78,8 +79,11 @@ topTicker?.addEventListener('click', () => {
 });
 
 installAuthUxStyles();
+installBitcoinAmbient();
 installCompactNavigation();
+installLiveNewsTicker();
 installFloatingAIChat();
+installCookieConsent();
 initAuth();
 route();
 refreshTopTicker();
@@ -174,7 +178,10 @@ function badge(signal) {
 }
 
 function sourcePill(source) {
-  return `<span class="source-pill ${source === 'api' ? 'api' : 'mock'}">${source === 'api' ? '● API thật' : '● Demo fallback'}</span>`;
+  const normalized = String(source || '').toLowerCase();
+  const isLive = ['api', 'rss', 'rss_cache', 'supabase'].includes(normalized);
+  const label = normalized === 'rss' ? '● RSS tin tức' : normalized === 'rss_cache' ? '● RSS cache' : isLive ? '● API thật' : '● Demo fallback';
+  return `<span class="source-pill ${isLive ? 'api' : 'mock'}">${label}</span>`;
 }
 
 function normalizeOhlcv(hours = 168) {
@@ -256,6 +263,24 @@ function buildMockP2PComparison() {
   return { source: 'mock', sell: compare(rows.find(r => r.trade_type === 'SELL'), 'sell'), buy: compare(rows.find(r => r.trade_type === 'BUY'), 'buy'), summary: 'So sánh P2P với giá thị trường quy đổi VNĐ.', disclaimer: 'Spread thay đổi nhanh theo merchant và hạn mức.' };
 }
 
+
+function buildMockNews() {
+  const now = new Date().toISOString();
+  return {
+    count: 5,
+    source: 'mock',
+    sources: [],
+    disclaimer: 'Tin tức demo dùng khi backend hoặc RSS chưa sẵn sàng.',
+    data: [
+      { title: 'Bitcoin biến động mạnh: nên kết hợp Risk Score, dữ liệu P2P và độ mới dữ liệu', source: 'Demo fallback', published_at: now, link: '#', summary: 'Tin demo phục vụ ticker: người dùng không nên đọc giá đơn lẻ mà cần nhìn cả rủi ro và dữ liệu cập nhật.', tags: ['BTC', 'risk'] },
+      { title: 'Dữ liệu P2P giúp ước tính số tiền thực nhận sát tình huống giao dịch tại Việt Nam', source: 'Demo fallback', published_at: now, link: '#', summary: 'Spread P2P có thể làm số tiền nhận được khác đáng kể so với giá thị trường quy đổi.', tags: ['P2P', 'VND'] },
+      { title: 'AI Advisor cần giải thích lý do, rủi ro và disclaimer thay vì đưa lệnh mua bán tuyệt đối', source: 'Demo fallback', published_at: now, link: '#', summary: 'AI trong phạm vi môn học đóng vai trò diễn giải dữ liệu và hỗ trợ học tập.', tags: ['AI', 'education'] },
+      { title: 'GitHub Actions đồng bộ dữ liệu theo giờ giúp dashboard tránh phụ thuộc dữ liệu mock', source: 'Demo fallback', published_at: now, link: '#', summary: 'Pipeline dữ liệu tự động là điểm cộng cho báo cáo FinTech/BigData.', tags: ['pipeline', 'data'] },
+      { title: 'Cookie banner minh bạch lựa chọn lưu trữ local preference cho trải nghiệm người dùng', source: 'Demo fallback', published_at: now, link: '#', summary: 'Trong MVP, cookie chỉ dùng để lưu lựa chọn giao diện/cookie consent, không tracking.', tags: ['UX', 'cookie'] }
+    ]
+  };
+}
+
 function mockFor(endpoint) {
   if (endpoint.startsWith('/api/latest')) return window.MOCK_DATA.latest;
   if (endpoint.startsWith('/api/indicators/summary')) return window.MOCK_DATA.summary;
@@ -271,6 +296,7 @@ function mockFor(endpoint) {
   if (endpoint.startsWith('/api/market-alerts')) return buildMockMarketAlerts();
   if (endpoint.startsWith('/api/data-reliability')) return buildMockDataReliability();
   if (endpoint.startsWith('/api/p2p-comparison')) return buildMockP2PComparison();
+  if (endpoint.startsWith('/api/news/latest')) return buildMockNews();
   if (endpoint.startsWith('/api/ai/history')) return window.MOCK_DATA.aiHistory || { count: 0, data: [] };
   return null;
 }
@@ -885,6 +911,76 @@ async function renderRiskPage() {
     `;
   } catch (error) {
     document.getElementById('riskContent').innerHTML = errorBox(error.message);
+  }
+}
+
+
+function newsCardHTML(item) {
+  const source = item.source || 'Nguồn tin';
+  const link = item.link && item.link !== '#' ? item.link : '#news';
+  const external = link !== '#news';
+  const tags = (item.tags || []).slice(0, 3).map(tag => `<span class="mini-tag">${escapeHTML(tag)}</span>`).join('');
+  return `
+    <article class="news-card">
+      <div class="news-card-top"><span class="badge amber">${escapeHTML(source)}</span><span class="meta">${formatVNTime(item.published_at, 'short')}</span></div>
+      <h3>${external ? `<a href="${escapeHTML(link)}" target="_blank" rel="noopener noreferrer">${escapeHTML(item.title)}</a>` : escapeHTML(item.title)}</h3>
+      <p>${escapeHTML(item.summary || 'Tin tức dùng để bổ sung bối cảnh cho dashboard và AI Advisor.')}</p>
+      <div class="news-tags">${tags}</div>
+    </article>
+  `;
+}
+
+async function renderNewsPage() {
+  app.innerHTML = `
+    <section class="page-head">
+      <div><span class="eyebrow">Market News</span><h1>Tin tức BTC chạy theo thời gian thực</h1><p class="lead">Trang này bổ sung bối cảnh thị trường cho Dashboard/Risk Score. Tin tức chỉ là yếu tố tham khảo, không thay thế dữ liệu giá và quản trị rủi ro.</p></div>
+      <button class="btn primary" id="reloadNews">Làm mới tin tức</button>
+    </section>
+    <section id="newsContent">${loadingCard(520)}</section>
+  `;
+  document.getElementById('reloadNews').addEventListener('click', renderNewsPage);
+  try {
+    const [newsRes, riskRes, alertsRes] = await Promise.all([
+      fetchJson('/api/news/latest?limit=12'),
+      fetchJson('/api/risk-score'),
+      fetchJson('/api/market-alerts')
+    ]);
+    const news = newsRes.data.data || [];
+    const risk = riskRes.data;
+    const alerts = alertsRes.data.data || [];
+    document.getElementById('newsContent').innerHTML = `
+      <div class="news-hero card">
+        <div>
+          <span class="badge blue">${escapeHTML(newsRes.data.source || newsRes.source)}</span>
+          <h2>News Context Layer</h2>
+          <p>Tầng tin tức giúp bài demo gần thực tế hơn: dữ liệu giá trả lời “thị trường đang làm gì”, còn tin tức giúp đặt câu hỏi “vì sao tâm lý thị trường có thể thay đổi”.</p>
+          <p class="meta">${escapeHTML(newsRes.data.disclaimer || 'Tin tức chỉ dùng để bổ sung bối cảnh học tập.')}</p>
+        </div>
+        <div class="news-risk-mini">
+          <strong>${risk.score}/100</strong><span>${escapeHTML(risk.label_vi || risk.level || 'Risk Score')}</span><a href="#risk">Xem Risk Score</a>
+        </div>
+      </div>
+      <div class="grid two section">
+        <div class="card">
+          <div class="section-head"><div><h2>Cảnh báo liên quan</h2><p>Kết hợp news ticker với rule-based alerts để tránh diễn giải tin tức tách rời dữ liệu.</p></div></div>
+          ${marketAlertsHTML(alerts.slice(0, 4))}
+        </div>
+        <div class="card">
+          <h2>Cách dùng trong báo cáo</h2>
+          <ul class="report-list">
+            <li>Tin tức là lớp ngữ cảnh, không phải tín hiệu mua/bán độc lập.</li>
+            <li>AI Advisor nên kết hợp tin tức với Risk Score, RSI, MACD và độ mới dữ liệu.</li>
+            <li>Nếu RSS lỗi, frontend/backend dùng fallback để demo không bị vỡ.</li>
+          </ul>
+        </div>
+      </div>
+      <section class="section">
+        <div class="section-head"><div><h2>Dòng tin BTC mới nhất</h2><p>${sourcePill(newsRes.source)} · Số tin: ${news.length}</p></div></div>
+        <div class="news-grid">${news.map(newsCardHTML).join('')}</div>
+      </section>
+    `;
+  } catch (error) {
+    document.getElementById('newsContent').innerHTML = errorBox(error.message);
   }
 }
 
@@ -1531,6 +1627,99 @@ function installAuthUxStyles() {
   document.head.appendChild(style);
 }
 
+
+
+function installBitcoinAmbient() {
+  if (document.getElementById('btcAmbientLayer')) return;
+  const layer = document.createElement('div');
+  layer.id = 'btcAmbientLayer';
+  layer.className = 'btc-ambient-layer';
+  layer.setAttribute('aria-hidden', 'true');
+  layer.innerHTML = '<span>₿</span><span>₿</span><span>₿</span><span>₿</span>';
+  document.body.appendChild(layer);
+}
+
+function installLiveNewsTicker() {
+  if (document.getElementById('liveNewsTicker')) return;
+  document.body.insertAdjacentHTML('beforeend', `
+    <aside id="liveNewsTicker" class="live-news-ticker" aria-label="Tin tức Bitcoin chạy">
+      <button class="live-news-label" type="button" title="Mở trang tin tức">BTC News</button>
+      <div class="live-news-track"><div id="liveNewsTrackInner" class="live-news-track-inner">Đang tải tin tức thị trường...</div></div>
+      <button id="liveNewsPause" class="live-news-pause" type="button" aria-pressed="false" title="Tạm dừng/chạy ticker">Ⅱ</button>
+    </aside>
+  `);
+  document.body.classList.add('has-live-news');
+  document.querySelector('.live-news-label')?.addEventListener('click', () => { location.hash = '#news'; });
+  document.getElementById('liveNewsTicker')?.addEventListener('click', event => {
+    if (event.target.closest('.live-news-pause') || event.target.closest('.live-news-label')) return;
+    location.hash = '#news';
+  });
+  document.getElementById('liveNewsPause')?.addEventListener('click', () => {
+    const ticker = document.getElementById('liveNewsTicker');
+    const paused = !ticker.classList.contains('paused');
+    ticker.classList.toggle('paused', paused);
+    const btn = document.getElementById('liveNewsPause');
+    btn.setAttribute('aria-pressed', String(paused));
+    btn.textContent = paused ? '▶' : 'Ⅱ';
+  });
+  refreshLiveNewsTicker();
+  setInterval(refreshLiveNewsTicker, 10 * 60_000);
+}
+
+async function refreshLiveNewsTicker() {
+  const inner = document.getElementById('liveNewsTrackInner');
+  if (!inner) return;
+  try {
+    const res = await fetchJson('/api/news/latest?limit=8', { timeout: 6500 });
+    const items = (res.data.data || []).slice(0, 8);
+    if (!items.length) throw new Error('Không có tin');
+    const html = items.map(item => `<span><b>₿</b> ${escapeHTML(item.title)} <em>${escapeHTML(item.source || '')}</em></span>`).join('');
+    inner.innerHTML = `<div class="live-news-segment">${html}</div><div class="live-news-segment" aria-hidden="true">${html}</div>`;
+    inner.style.setProperty('--ticker-duration', `${Math.max(38, items.length * 9)}s`);
+    document.getElementById('liveNewsTicker')?.classList.toggle('mock', res.source !== 'api' && res.data.source === 'mock');
+  } catch (_) {
+    const fallback = buildMockNews().data.slice(0, 5);
+    const html = fallback.map(item => `<span><b>₿</b> ${escapeHTML(item.title)} <em>Demo</em></span>`).join('');
+    inner.innerHTML = `<div class="live-news-segment">${html}</div><div class="live-news-segment" aria-hidden="true">${html}</div>`;
+    inner.style.setProperty('--ticker-duration', `${Math.max(42, fallback.length * 10)}s`);
+  }
+}
+
+function cookieChoiceKey() {
+  return 'btc_bigdata_cookie_consent_v1';
+}
+
+function setConsentCookie(value) {
+  const maxAge = 60 * 60 * 24 * 180;
+  document.cookie = `btc_cookie_consent=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; SameSite=Lax`;
+  localStorage.setItem(cookieChoiceKey(), value);
+}
+
+function installCookieConsent() {
+  if (localStorage.getItem(cookieChoiceKey()) || document.getElementById('cookieConsent')) return;
+  document.body.insertAdjacentHTML('beforeend', `
+    <section id="cookieConsent" class="cookie-consent" role="dialog" aria-live="polite" aria-label="Thông báo cookie">
+      <div class="cookie-icon">🍪</div>
+      <div class="cookie-copy">
+        <strong>Cookie & local storage</strong>
+        <p>Website chỉ dùng lưu trữ cần thiết để nhớ lựa chọn giao diện, trạng thái sidebar, vị trí chat AI và cookie consent. Không dùng cookie quảng cáo trong bản demo môn học.</p>
+      </div>
+      <div class="cookie-actions">
+        <button class="btn secondary small" id="cookieEssential" type="button">Chỉ cần thiết</button>
+        <button class="btn primary small" id="cookieAccept" type="button">Đồng ý</button>
+      </div>
+    </section>
+  `);
+  const close = value => {
+    setConsentCookie(value);
+    const el = document.getElementById('cookieConsent');
+    el?.classList.add('hide');
+    window.setTimeout(() => el?.remove(), 220);
+    showToast(value === 'accepted' ? 'Đã lưu lựa chọn cookie.' : 'Chỉ bật lưu trữ cần thiết.');
+  };
+  document.getElementById('cookieEssential')?.addEventListener('click', () => close('essential'));
+  document.getElementById('cookieAccept')?.addEventListener('click', () => close('accepted'));
+}
 
 function installCompactNavigation() {
   const nav = document.getElementById('sideNav');
