@@ -33,7 +33,7 @@ let orders = [];
 let currentSession = null;
 let authReady = !supabaseAuth;
 const protectedRoutes = new Set(['history', 'alerts', 'billing', 'set-password', 'account']);
-const trustRoutes = new Set(['dashboard', 'chart', 'p2p', 'tax', 'settlement', 'chat']);
+const trustRoutes = new Set(['dashboard', 'chart', 'p2p', 'tax', 'settlement', 'chat', 'risk', 'reliability']);
 
 const signalMap = {
   BUY: { vi: 'MUA', className: 'buy', icon: '↗' },
@@ -49,6 +49,9 @@ const routes = {
   dashboard: renderDashboardPage,
   chart: renderChartPage,
   p2p: renderP2PPage,
+  risk: renderRiskPage,
+  reliability: renderReliabilityPage,
+  guide: renderIndicatorGuidePage,
   tax: renderTaxPage,
   settlement: renderSettlementPage,
   chat: renderChatPage,
@@ -184,6 +187,75 @@ function normalizeP2P(hours = 168) {
   return { count: data.length, hours, latest: data[0] || null, data };
 }
 
+function buildMockDataReliability() {
+  const latest = window.MOCK_DATA?.latest || {};
+  const p2p = normalizeP2P(24);
+  return {
+    level: 'GOOD',
+    message: 'Đang dùng dữ liệu demo/fallback để minh họa cơ chế kiểm tra độ tin cậy.',
+    status: {
+      now_utc: new Date().toISOString(),
+      latest_ohlcv_timestamp: latest.timestamp,
+      latest_p2p_timestamp: p2p.latest?.timestamp,
+      ohlcv_age_hours: 0.8,
+      p2p_age_hours: 1.2,
+      is_ohlcv_fresh: true,
+      is_p2p_fresh: true
+    },
+    checks: [
+      { name: 'OHLCV BTC/USDT', source: 'mock', latest_timestamp: latest.timestamp, age_hours: 0.8, fresh: true, threshold_hours: 2, description: 'Dữ liệu giá 1 giờ cho dashboard và AI.' },
+      { name: 'P2P USDT/VNĐ', source: 'mock', latest_timestamp: p2p.latest?.timestamp, age_hours: 1.2, fresh: true, threshold_hours: 2, description: 'Dữ liệu P2P dùng cho spread và thực nhận.' }
+    ],
+    sources: { ohlcv: 'Binance/Data API → sync_market_data.py → Supabase', p2p: 'Binance P2P API/fallback', ai: 'AI provider nằm ở backend .env' },
+    automation: 'GitHub Actions chạy mỗi giờ.',
+    sample_count: { p2p_last_24h: p2p.count }
+  };
+}
+
+function buildMockRiskScore() {
+  const latest = window.MOCK_DATA?.latest || {};
+  const score = Math.min(100, Math.max(0, Math.round(28 + Math.abs((latest.rsi_14 || 50) - 50) * 0.7 + Math.abs(latest.macd_hist || 0) * 0.03)));
+  const level = score >= 70 ? 'HIGH' : score >= 40 ? 'MEDIUM' : 'LOW';
+  return {
+    timestamp: latest.timestamp,
+    price: latest.close,
+    source: 'mock',
+    score,
+    level,
+    label_vi: level === 'HIGH' ? 'Rủi ro cao' : level === 'MEDIUM' ? 'Rủi ro trung bình' : 'Rủi ro thấp',
+    recommendation: level === 'HIGH' ? 'Ưu tiên bảo toàn vốn và quan sát thêm.' : level === 'MEDIUM' ? 'Nên chia nhỏ vị thế, tránh vào lệnh lớn.' : 'Có thể theo dõi cơ hội nhưng vẫn cần quản trị rủi ro.',
+    factors: [
+      { name: 'RSI', impact: 8, value: latest.rsi_14, note: 'RSI được dùng để phát hiện quá mua/quá bán.' },
+      { name: 'MACD', impact: 6, value: latest.macd_hist, note: 'MACD histogram phản ánh động lượng ngắn hạn.' },
+      { name: 'Bollinger width', impact: 5, value: latest.bb_width, note: 'Độ rộng Bollinger mô tả biến động.' }
+    ],
+    method: 'Mock rule-based',
+    disclaimer: 'Risk Score là chỉ báo tham khảo cho bài học.'
+  };
+}
+
+function buildMockMarketAlerts() {
+  const risk = buildMockRiskScore();
+  const latest = window.MOCK_DATA?.latest || {};
+  const data = [];
+  if ((latest.rsi_14 || 0) > 70) data.push({ severity: 'warn', title: 'RSI quá mua', message: 'RSI cao, cần thận trọng khi mua mới.', metric: 'rsi_14', value: latest.rsi_14 });
+  if ((latest.macd_hist || 0) < 0) data.push({ severity: 'warn', title: 'MACD yếu', message: 'MACD histogram âm, động lượng chưa mạnh.', metric: 'macd_hist', value: latest.macd_hist });
+  if (!data.length) data.push({ severity: 'info', title: 'Chưa có cảnh báo mạnh', message: 'Các rule hiện tại chưa phát hiện tín hiệu rủi ro nổi bật.', metric: 'market' });
+  return { count: data.length, data, risk, sources: { latest: 'mock', summary: 'mock', p2p: 'mock' }, disclaimer: 'Cảnh báo rule-based chỉ dùng tham khảo.' };
+}
+
+function buildMockP2PComparison() {
+  const rows = normalizeP2P(24).data || [];
+  const compare = (row, userSide) => {
+    if (!row) return null;
+    const diff = (row.p2p_price || 0) - (row.market_price || 0);
+    const diffPct = row.market_price ? diff / row.market_price * 100 : 0;
+    const favorable = userSide === 'sell' ? diff > 0 : diff < 0;
+    return { trade_type: row.trade_type, user_side: userSide, p2p_price: row.p2p_price, market_price: row.market_price, difference_vnd: Math.round(diff), difference_pct: Number(diffPct.toFixed(4)), favorable, samples: row.samples, timestamp: row.timestamp, explain: favorable ? 'Nguồn P2P đang có lợi hơn giá tham chiếu.' : 'Nguồn P2P đang kém lợi hơn giá tham chiếu.' };
+  };
+  return { source: 'mock', sell: compare(rows.find(r => r.trade_type === 'SELL'), 'sell'), buy: compare(rows.find(r => r.trade_type === 'BUY'), 'buy'), summary: 'So sánh P2P với giá thị trường quy đổi VNĐ.', disclaimer: 'Spread thay đổi nhanh theo merchant và hạn mức.' };
+}
+
 function mockFor(endpoint) {
   if (endpoint.startsWith('/api/latest')) return window.MOCK_DATA.latest;
   if (endpoint.startsWith('/api/indicators/summary')) return window.MOCK_DATA.summary;
@@ -195,6 +267,10 @@ function mockFor(endpoint) {
     const hours = Number(new URLSearchParams(endpoint.split('?')[1] || '').get('hours') || 168);
     return normalizeP2P(hours);
   }
+  if (endpoint.startsWith('/api/risk-score')) return buildMockRiskScore();
+  if (endpoint.startsWith('/api/market-alerts')) return buildMockMarketAlerts();
+  if (endpoint.startsWith('/api/data-reliability')) return buildMockDataReliability();
+  if (endpoint.startsWith('/api/p2p-comparison')) return buildMockP2PComparison();
   if (endpoint.startsWith('/api/ai/history')) return window.MOCK_DATA.aiHistory || { count: 0, data: [] };
   return null;
 }
@@ -580,14 +656,18 @@ async function renderDashboardPage() {
   `;
   document.getElementById('refreshDashboard').addEventListener('click', renderDashboardPage);
   try {
-    const [latestRes, summaryRes, ohlcvRes] = await Promise.all([
+    const [latestRes, summaryRes, ohlcvRes, riskRes, alertsRes] = await Promise.all([
       fetchJson('/api/latest'),
       fetchJson('/api/indicators/summary'),
-      fetchJson('/api/ohlcv?hours=24')
+      fetchJson('/api/ohlcv?hours=24'),
+      fetchJson('/api/risk-score'),
+      fetchJson('/api/market-alerts')
     ]);
     const latest = latestRes.data;
     const summary = summaryRes.data;
     const ohlcv = ohlcvRes.data;
+    const risk = riskRes.data;
+    const alerts = alertsRes.data.data || [];
     const change = latest.open ? ((latest.close - latest.open) / latest.open) * 100 : 0;
     const verdict = summary.overall?.verdict || 'NEUTRAL';
     const signals = summary.signals || {};
@@ -595,6 +675,7 @@ async function renderDashboardPage() {
       <div class="kpi-row">
         <div class="stat-card"><span class="stat-label">BTC/USDT</span><strong class="stat-value">${formatUSD(latest.close)}</strong><div class="stat-note">${formatPct(change)} trong nến hiện tại · ${sourcePill(latestRes.source)}</div></div>
         <div class="stat-card"><span class="stat-label">Khuyến nghị tổng hợp</span><strong class="stat-value">${badge(verdict)}</strong><div class="stat-note">${summary.overall?.buy || 0} MUA · ${summary.overall?.sell || 0} BÁN · ${summary.overall?.neutral || 0} TRUNG LẬP</div></div>
+        <div class="stat-card"><span class="stat-label">Risk Score</span><strong class="stat-value">${risk.score}/100</strong><div class="stat-note">${escapeHTML(risk.label_vi || risk.level)} · <a href="#risk">Xem cảnh báo</a></div></div>
         <div class="stat-card"><span class="stat-label">Cập nhật</span><strong class="stat-value" style="font-size:1.7rem">${formatVNTime(latest.timestamp)}</strong><div class="stat-note">Hiển thị theo giờ Việt Nam UTC+7</div></div>
         <div class="stat-card"><span class="stat-label">Volume</span><strong class="stat-value">${formatNumber(latest.volume, 2)}</strong><div class="stat-note">BTC · ${formatNumber(latest.trades, 0)} lệnh</div></div>
       </div>
@@ -604,9 +685,15 @@ async function renderDashboardPage() {
       return `<div class="card"><h3>${key.replace('_', ' ')}</h3><p>${badge(s.signal)}</p><p style="margin-top:10px">${escapeHTML(s.note)}</p><div class="meta">Giá trị: ${formatNumber(s.value, 2)}</div></div>`;
     }).join('')}
       </div>
-      <div class="card section">
-        <div class="section-head"><div><h2>Biến động 24 giờ gần nhất</h2><p>Đường giá đóng cửa dùng để xem nhanh xu hướng trong ngày.</p></div><a class="btn secondary" href="#chart">Xem biểu đồ chi tiết</a></div>
-        <div id="miniChart" class="chart-box small"></div>
+      <div class="grid two section">
+        <div class="card">
+          <div class="section-head"><div><h2>Biến động 24 giờ gần nhất</h2><p>Đường giá đóng cửa dùng để xem nhanh xu hướng trong ngày.</p></div><a class="btn secondary" href="#chart">Xem biểu đồ chi tiết</a></div>
+          <div id="miniChart" class="chart-box small"></div>
+        </div>
+        <div class="card">
+          <div class="section-head"><div><h2>Cảnh báo nhanh</h2><p>Rule-based alerts giúp người dùng không cần tự đọc toàn bộ bảng chỉ báo.</p></div><a class="btn secondary" href="#risk">Chi tiết</a></div>
+          ${marketAlertsHTML(alerts.slice(0, 4))}
+        </div>
       </div>
     `;
     drawLineChart('miniChart', ohlcv.data || [], 'close', 'Giá đóng cửa BTC/USDT');
@@ -703,6 +790,158 @@ function p2pCard(type, row) {
       <div class="result-panel" style="border-color:${isGood ? '#bbf7d0' : '#fecaca'}"><strong>${isGood ? '✅' : '⚠️'} ${text}</strong></div>
       <button class="btn ${type === 'SELL' ? 'primary' : 'accent'} full" data-trade-side="${type}" style="margin-top:14px">${type === 'SELL' ? 'Bán ngay demo' : 'Mua ngay demo'}</button>
     </div>
+  `;
+}
+
+function riskLevelClass(level) {
+  if (level === 'HIGH') return 'danger';
+  if (level === 'MEDIUM') return 'warn';
+  return 'ok';
+}
+
+function riskScoreCard(risk) {
+  const level = risk?.level || 'LOW';
+  const levelClass = riskLevelClass(level);
+  const score = Number(risk?.score || 0);
+  return `
+    <div class="risk-score-card ${levelClass}">
+      <div class="risk-score-ring" style="--score:${score}"><strong>${score}</strong><span>/100</span></div>
+      <div>
+        <span class="badge ${levelClass === 'danger' ? 'red' : levelClass === 'warn' ? 'amber' : 'green'}">${escapeHTML(risk?.label_vi || level)}</span>
+        <h2>Risk Score thị trường BTC</h2>
+        <p>${escapeHTML(risk?.recommendation || 'Risk Score rule-based dùng cho mục tiêu học tập.')}</p>
+        <div class="meta">${escapeHTML(risk?.method || 'Rule-based MVP')}</div>
+      </div>
+    </div>
+  `;
+}
+
+function alertClass(severity) {
+  if (severity === 'danger') return 'red';
+  if (severity === 'warn') return 'amber';
+  return 'blue';
+}
+
+function marketAlertsHTML(alerts = []) {
+  return `<div class="insight-list">${alerts.map(a => `
+    <div class="insight-item ${escapeHTML(a.severity || 'info')}">
+      <span class="badge ${alertClass(a.severity)}">${escapeHTML((a.severity || 'info').toUpperCase())}</span>
+      <div><strong>${escapeHTML(a.title)}</strong><p>${escapeHTML(a.message)}</p><small>${escapeHTML(a.metric || '')}${isNum(Number(a.value)) ? ` · ${formatNumber(Number(a.value), 3)}` : ''}</small></div>
+    </div>
+  `).join('')}</div>`;
+}
+
+function p2pComparisonBlock(item, title) {
+  if (!item) return `<div class="card"><h3>${title}</h3><p>Chưa có dữ liệu so sánh.</p></div>`;
+  return `
+    <div class="card">
+      <span class="badge ${item.favorable ? 'green' : 'red'}">${item.favorable ? 'Có lợi hơn' : 'Kém lợi hơn'}</span>
+      <h3 style="margin-top:10px">${title}</h3>
+      <div class="breakdown">
+        <div><span>Giá P2P</span><strong>${formatVND(item.p2p_price)} / USDT</strong><small>${escapeHTML(item.trade_type || '')} · ${formatVNTime(item.timestamp, 'short')}</small></div>
+        <div><span>Giá tham chiếu</span><strong>${formatVND(item.market_price)} / USDT</strong><small>Quy đổi từ giá thị trường</small></div>
+        <div class="total"><span>Chênh lệch</span><strong>${formatVND(item.difference_vnd)}</strong><small>${formatPct(item.difference_pct, 3)} · ${escapeHTML(item.explain || '')}</small></div>
+      </div>
+    </div>
+  `;
+}
+
+async function renderRiskPage() {
+  app.innerHTML = `
+    <section class="page-head">
+      <div><span class="eyebrow">Risk Score & Cảnh báo</span><h1>Biến nhiều chỉ báo thành cảnh báo dễ hiểu</h1><p class="lead">Trang này dùng rule-based model trong backend, phù hợp phạm vi môn học: không dự đoán giá, chỉ tổng hợp rủi ro từ RSI, MACD, EMA, Bollinger, ATR, volume và độ mới dữ liệu.</p></div>
+      <a class="btn secondary" href="#guide">Xem cách đọc chỉ báo</a>
+    </section>
+    <section id="riskContent">${loadingCard(560)}</section>
+  `;
+  try {
+    const [riskRes, alertsRes, cmpRes] = await Promise.all([
+      fetchJson('/api/risk-score'),
+      fetchJson('/api/market-alerts'),
+      fetchJson('/api/p2p-comparison')
+    ]);
+    const risk = riskRes.data;
+    const alerts = alertsRes.data.data || [];
+    const cmp = cmpRes.data;
+    document.getElementById('riskContent').innerHTML = `
+      ${riskScoreCard(risk)}
+      <section class="grid two section">
+        <div class="card">
+          <div class="section-head"><div><h2>Cảnh báo hiện tại</h2><p>Rule-based alerts giúp người dùng tránh bỏ sót tín hiệu quan trọng.</p></div>${sourcePill(alertsRes.source)}</div>
+          ${marketAlertsHTML(alerts)}
+          <p class="meta">${escapeHTML(alertsRes.data.disclaimer || 'Thông tin chỉ mang tính tham khảo.')}</p>
+        </div>
+        <div class="card">
+          <h2>Yếu tố tạo Risk Score</h2>
+          <div class="factor-list">
+            ${(risk.factors || []).map(f => `<div><strong>${escapeHTML(f.name)}</strong><span>+${formatNumber(Number(f.impact || 0), 1)} điểm</span><p>${escapeHTML(f.note || '')}</p></div>`).join('')}
+          </div>
+        </div>
+      </section>
+      <section class="section">
+        <div class="section-head"><div><span class="eyebrow">P2P Comparison</span><h2>Giá sàn vs Giá P2P</h2><p>${escapeHTML(cmp.summary || '')}</p></div><a class="btn primary" href="#settlement">Tính thực nhận</a></div>
+        <div class="grid two">${p2pComparisonBlock(cmp.sell, 'Nếu người dùng BÁN USDT lấy VNĐ')}${p2pComparisonBlock(cmp.buy, 'Nếu người dùng MUA USDT bằng VNĐ')}</div>
+      </section>
+    `;
+  } catch (error) {
+    document.getElementById('riskContent').innerHTML = errorBox(error.message);
+  }
+}
+
+async function renderReliabilityPage() {
+  app.innerHTML = `
+    <section class="page-head">
+      <div><span class="eyebrow">Data Reliability</span><h1>Độ tin cậy và độ mới dữ liệu</h1><p class="lead">Tính năng này giúp người dùng biết dữ liệu có đang đủ mới để đọc dashboard hay không, tránh quyết định dựa trên dữ liệu cũ.</p></div>
+      <button class="btn primary" id="reloadReliability">Kiểm tra lại</button>
+    </section>
+    <section id="reliabilityContent">${loadingCard(520)}</section>
+  `;
+  document.getElementById('reloadReliability').addEventListener('click', renderReliabilityPage);
+  try {
+    const res = await fetchJson('/api/data-reliability');
+    const data = res.data;
+    const level = data.level === 'GOOD' ? 'ok' : data.level === 'WARNING' ? 'warn' : 'danger';
+    document.getElementById('reliabilityContent').innerHTML = `
+      <div class="trust-badge ${level}"><span class="dot ${level}"></span><strong>${escapeHTML(data.level)}</strong> · ${escapeHTML(data.message)} ${sourcePill(res.source)}</div>
+      <div class="grid two">
+        ${(data.checks || []).map(c => `
+          <div class="card">
+            <span class="badge ${c.fresh ? 'green' : 'amber'}">${c.fresh ? 'Fresh' : 'Cần kiểm tra'}</span>
+            <h3 style="margin-top:10px">${escapeHTML(c.name)}</h3>
+            <p>${escapeHTML(c.description || '')}</p>
+            <div class="breakdown">
+              <div><span>Nguồn</span><strong>${escapeHTML(c.source || '—')}</strong></div>
+              <div><span>Cập nhật gần nhất</span><strong>${c.latest_timestamp ? formatVNTime(c.latest_timestamp) : '—'}</strong><small>${ageText(Number(c.age_hours))}</small></div>
+              <div><span>Ngưỡng fresh</span><strong>${formatNumber(Number(c.threshold_hours || 2), 1)} giờ</strong></div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <section class="grid two section">
+        <div class="card"><h3>Nguồn dữ liệu</h3><ul class="report-list">${Object.entries(data.sources || {}).map(([k, v]) => `<li><strong>${escapeHTML(k)}:</strong> ${escapeHTML(v)}</li>`).join('')}</ul></div>
+        <div class="card"><h3>Cơ chế tự động</h3><p>${escapeHTML(data.automation || '')}</p><ul class="report-list"><li>GitHub Actions chạy theo cron mỗi giờ.</li><li>Script lấy dữ liệu, tính chỉ báo, upsert vào Supabase.</li><li>Frontend gọi backend API và hiển thị badge độ tin cậy.</li></ul></div>
+      </section>
+    `;
+  } catch (error) {
+    document.getElementById('reliabilityContent').innerHTML = errorBox(error.message);
+  }
+}
+
+function renderIndicatorGuidePage() {
+  const guides = [
+    ['RSI', 'Đo trạng thái quá mua/quá bán. RSI > 70 thường cần thận trọng mua mới, RSI < 30 thường cho thấy quá bán nhưng chưa chắc đảo chiều ngay.'],
+    ['MACD', 'Đo động lượng. MACD histogram dương thường tích cực hơn, âm cho thấy động lượng tăng yếu.'],
+    ['EMA 20/50/200', 'So sánh giá với đường trung bình để nhìn xu hướng ngắn, trung và dài hạn. Giá dưới EMA50/EMA200 làm Risk Score tăng.'],
+    ['Bollinger Bands', 'Dải biến động quanh giá. Giá gần dải trên/dưới và band mở rộng mạnh cho thấy rủi ro biến động cao.'],
+    ['ATR', 'Đo độ biến động trung bình. ATR càng cao so với giá, giao dịch càng rủi ro.'],
+    ['Volume MA20', 'So sánh volume hiện tại với trung bình 20 kỳ để phát hiện thanh khoản bất thường.']
+  ];
+  app.innerHTML = `
+    <section class="page-head"><div><span class="eyebrow">Giải thích chỉ báo</span><h1>Người mới đọc Dashboard như thế nào?</h1><p class="lead">Trang này biến thuật ngữ kỹ thuật thành ngôn ngữ dễ hiểu, phù hợp mục tiêu giáo dục tài chính của đề tài.</p></div><a class="btn primary" href="#risk">Xem Risk Score</a></section>
+    <section class="grid three">
+      ${guides.map(([name, desc]) => `<div class="card"><span class="badge blue">Indicator</span><h3 style="margin-top:10px">${name}</h3><p>${desc}</p></div>`).join('')}
+    </section>
+    <section class="card section"><h2>Cách hệ thống sử dụng các chỉ báo</h2><p>Backend không dùng một chỉ báo duy nhất để kết luận. Hệ thống tổng hợp RSI, MACD, EMA, Bollinger, ATR, volume và độ mới dữ liệu thành khuyến nghị BUY/SELL/NEUTRAL, Risk Score 0–100 và cảnh báo rule-based. Đây là mô hình minh họa cho môn học, không phải mô hình dự báo giá chuyên nghiệp.</p></section>
   `;
 }
 
@@ -813,12 +1052,19 @@ async function sendChat() {
     const data = res.data;
     chatMessages[chatMessages.length - 1] = {
       role: 'ai',
-      text: `${signalMap[data.verdict]?.vi || data.verdict} · Độ tin cậy ${data.confidence || 50}%\n\n${data.answer}\n\nLý do:\n${(data.reasons || []).map(x => `- ${x}`).join('\n')}\n\nRủi ro:\n${(data.risks || []).map(x => `- ${x}`).join('\n')}\n\n${data.disclaimer || 'Thông tin chỉ mang tính tham khảo.'}`
+      text: aiResponseText(data)
     };
   } catch (error) {
     chatMessages[chatMessages.length - 1] = { role: 'ai', text: `AI hiện không phản hồi được: ${error.message}` };
   }
   renderMessages();
+}
+
+
+function aiResponseText(data) {
+  const riskLine = data.risk_score != null ? `\nRisk Score: ${data.risk_score}/100${data.risk_level ? ` · ${data.risk_level}` : ''}` : '';
+  const factors = (data.risk_factors || []).slice(0, 3).map(x => `- ${x.name}: ${x.note}`).join('\n');
+  return `${signalMap[data.verdict]?.vi || data.verdict} · Độ tin cậy ${data.confidence || 50}%${riskLine}\n\n${data.answer}\n\nLý do:\n${(data.reasons || []).map(x => `- ${x}`).join('\n')}\n\nRủi ro:\n${(data.risks || []).map(x => `- ${x}`).join('\n')}${factors ? `\n\nYếu tố Risk Score:\n${factors}` : ''}\n\n${data.disclaimer || 'Thông tin chỉ mang tính tham khảo.'}`;
 }
 
 async function askAI(question) {
@@ -839,6 +1085,9 @@ async function askAI(question) {
       data: {
         verdict,
         confidence: 58,
+        risk_score: buildMockRiskScore().score,
+        risk_level: buildMockRiskScore().level,
+        risk_factors: buildMockRiskScore().factors,
         answer: `Backend AI chưa sẵn sàng nên đang dùng mock advisor. Với giá BTC quanh ${formatUSD(latest.close)}, hệ thống tạm kết luận ${signalMap[verdict]?.vi || verdict}.`,
         reasons: [
           `RSI hiện tại khoảng ${latest.rsi_14}, chưa đủ để khẳng định một chiều mạnh.`,
@@ -1477,7 +1726,7 @@ async function sendFloatingAIMessage() {
     const data = res.data;
     chatMessages[chatMessages.length - 1] = {
       role: 'ai',
-      text: `${signalMap[data.verdict]?.vi || data.verdict} · Độ tin cậy ${data.confidence || 50}%\n\n${data.answer}\n\nLý do:\n${(data.reasons || []).map(x => `- ${x}`).join('\n')}\n\nRủi ro:\n${(data.risks || []).map(x => `- ${x}`).join('\n')}\n\n${data.disclaimer || 'Thông tin chỉ mang tính tham khảo.'}`
+      text: aiResponseText(data)
     };
   } catch (error) {
     chatMessages[chatMessages.length - 1] = { role: 'ai', text: `AI hiện không phản hồi được: ${error.message}` };

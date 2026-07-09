@@ -25,11 +25,12 @@ Nhiệm vụ:
 - Nếu tín hiệu mâu thuẫn, ưu tiên NEUTRAL.
 - Luôn nhắc rằng đây chỉ là thông tin tham khảo, không phải lời khuyên đầu tư cá nhân.
 
-Trả lời gọn theo cấu trúc:
-1. Kết luận ngắn.
-2. 3-5 lý do chính.
-3. Rủi ro cần chú ý.
-4. Hành động thận trọng.
+Trả lời gọn theo cấu trúc cố định:
+1. Khuyến nghị: BUY/SELL/NEUTRAL và nói rõ đây là tham khảo.
+2. Mức độ tự tin: thấp/trung bình/cao, giải thích ngắn.
+3. Lý do chính: 3-5 gạch đầu dòng dựa trên chỉ báo được cung cấp.
+4. Rủi ro: nhắc Risk Score nếu dữ liệu có trường này, biến động, dữ liệu cũ/P2P nếu liên quan.
+5. Hành động thận trọng: không all-in, chia nhỏ vị thế, có điểm cắt lỗ hoặc quan sát thêm.
 """.strip()
 
 

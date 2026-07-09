@@ -117,7 +117,7 @@ def fetch_from_public_api(hours: int) -> tuple[list[dict[str, Any]], list[dict[s
 
 def fetch_binance_klines(hours: int) -> list[list[Any]]:
     limit = min(max(hours, 1), 1000)  # Binance spot klines limit tối đa thường là 1000.
-    base = os.getenv("BINANCE_API_BASE", "https://api.binance.com").rstrip("/")
+    base = os.getenv("BINANCE_API_BASE", "https://data-api.binance.vision").rstrip("/")
     url = f"{base}/api/v3/klines?symbol=BTCUSDT&interval=1h&limit={limit}"
     return fetch_json(url)
 

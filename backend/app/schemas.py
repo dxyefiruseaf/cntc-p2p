@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -16,6 +18,9 @@ class AskAIResponse(BaseModel):
     suggested_action: str
     disclaimer: str
     created_at: str
+    risk_score: int | None = None
+    risk_level: str | None = None
+    risk_factors: list[dict[str, Any]] = []
 
 
 class SeedRequest(BaseModel):

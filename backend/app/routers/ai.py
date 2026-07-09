@@ -14,7 +14,7 @@ from app.services.ai_service import (
     now_iso,
     suggested_action,
 )
-from app.services.indicator_service import score_market, signal_from_latest
+from app.services.indicator_service import calculate_risk_score, score_market, signal_from_latest
 from app.services.public_api_service import fetch_public_api
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
@@ -50,6 +50,7 @@ async def _market_context():
 async def ask_ai(payload: AskAIRequest, request: Request):
     latest, summary, p2p = await _market_context()
     rule = score_market(latest, summary)
+    risk = calculate_risk_score(latest)
 
     system_prompt = build_system_prompt()
     prompt = build_market_prompt(payload.question, latest, summary, p2p, rule, payload.risk_profile)
@@ -73,6 +74,9 @@ async def ask_ai(payload: AskAIRequest, request: Request):
         "suggested_action": suggested_action(rule["verdict"]),
         "disclaimer": DISCLAIMER,
         "created_at": created_at,
+        "risk_score": risk.get("score"),
+        "risk_level": risk.get("level"),
+        "risk_factors": risk.get("factors", []),
     }
 
     user = get_optional_user(request)
@@ -84,7 +88,7 @@ async def ask_ai(payload: AskAIRequest, request: Request):
             "confidence": rule["confidence"],
             "reasons": reasons,
             "risks": risks,
-            "market_snapshot": {"latest": latest, "summary": summary, "p2p_latest": p2p.get("latest")},
+            "market_snapshot": {"latest": latest, "summary": summary, "p2p_latest": p2p.get("latest"), "risk": risk},
             "model_name": "backend-ai-advisor",
             "user_id": user["id"] if user else None,
             "created_at": created_at,
