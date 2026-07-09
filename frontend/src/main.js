@@ -1935,7 +1935,7 @@ async function refreshDataTrustBadge() {
   const el = document.getElementById('dataTrustBadge');
   if (!el) return;
   try {
-    const res = await fetchJson('/api/data-status', { timeout: 6000 });
+    const res = await fetchJson('/api/data-status', { timeout: 30000 });
     const s = res.data;
     const o = ageText(s.ohlcv_age_hours);
     const p = ageText(s.p2p_age_hours);
