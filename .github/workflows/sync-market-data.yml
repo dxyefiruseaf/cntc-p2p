@@ -29,7 +29,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           PUBLIC_DATA_API_URL: ${{ vars.PUBLIC_DATA_API_URL || 'https://btc-bigdata-is55a.onrender.com' }}
-          SYNC_SOURCE: ${{ vars.SYNC_SOURCE || 'public_api' }}
+          SYNC_SOURCE: ${{ vars.SYNC_SOURCE || 'binance' }}
           SYNC_HOURS: ${{ vars.SYNC_HOURS || '720' }}
           SYNC_P2P_FROM_BINANCE: ${{ vars.SYNC_P2P_FROM_BINANCE || 'true' }}
           SYNC_P2P_PUBLIC_FALLBACK: ${{ vars.SYNC_P2P_PUBLIC_FALLBACK || 'true' }}
