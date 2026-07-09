@@ -31,6 +31,7 @@ jobs:
           PUBLIC_DATA_API_URL: ${{ vars.PUBLIC_DATA_API_URL || 'https://btc-bigdata-is55a.onrender.com' }}
           SYNC_SOURCE: ${{ vars.SYNC_SOURCE || 'binance' }}
           SYNC_HOURS: ${{ vars.SYNC_HOURS || '720' }}
+          BINANCE_API_BASE: ${{ vars.BINANCE_API_BASE || 'https://data-api.binance.vision' }}
           SYNC_P2P_FROM_BINANCE: ${{ vars.SYNC_P2P_FROM_BINANCE || 'true' }}
           SYNC_P2P_PUBLIC_FALLBACK: ${{ vars.SYNC_P2P_PUBLIC_FALLBACK || 'true' }}
           FALLBACK_USD_VND_RATE: ${{ vars.FALLBACK_USD_VND_RATE || '26000' }}
