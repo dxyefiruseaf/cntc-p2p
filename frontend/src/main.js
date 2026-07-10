@@ -1,7 +1,12 @@
 import './styles.css';
 import { createClient } from '@supabase/supabase-js';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/+$/, '');
+const LIVE_NEWS_HIDDEN_KEY = 'btc_bigdata_live_news_hidden_v1';
+
+function apiUrl(endpoint) {
+  return `${API_BASE}/${String(endpoint || '').replace(/^\/+/, '')}`;
+}
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 const supabaseAuth = SUPABASE_URL && SUPABASE_ANON_KEY
@@ -9,7 +14,7 @@ const supabaseAuth = SUPABASE_URL && SUPABASE_ANON_KEY
     auth: {
       persistSession: true,
       autoRefreshToken: true,
-      detectSessionInUrl: true
+      detectSessionInUrl: false
     }
   })
   : null;
@@ -84,6 +89,7 @@ installCompactNavigation();
 installLiveNewsTicker();
 installFloatingAIChat();
 installCookieConsent();
+cleanupSupabaseAuthRedirectHash();
 initAuth();
 route();
 refreshTopTicker();
@@ -303,15 +309,18 @@ function mockFor(endpoint) {
 
 async function fetchJson(endpoint, options = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeout || 9000);
+  const timeoutMs = options.timeout ?? 30000;
+  const timeout = timeoutMs > 0
+    ? setTimeout(() => controller.abort(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs)
+    : null;
   try {
-    const response = await fetch(`${API_BASE}${endpoint}`, {
+    const response = await fetch(apiUrl(endpoint), {
       method: options.method || 'GET',
       headers: { 'Content-Type': 'application/json', ...authHeader(), ...(options.headers || {}) },
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: controller.signal
     });
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
     if (!response.ok) {
       let detail = `HTTP ${response.status}`;
       try {
@@ -322,7 +331,7 @@ async function fetchJson(endpoint, options = {}) {
     }
     return { data: await response.json(), source: 'api' };
   } catch (error) {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
     const fallback = mockFor(endpoint);
     if (fallback) return { data: fallback, source: 'mock', error };
     throw error;
@@ -743,14 +752,18 @@ async function renderChartPage() {
     btn.addEventListener('click', () => { chartHours = Number(btn.dataset.hours); renderChartPage(); });
   });
   try {
-    const res = await fetchJson(`/api/ohlcv?hours=${chartHours}`);
+    const [res, p2pRes] = await Promise.all([
+      fetchJson(`/api/ohlcv?hours=${chartHours}`),
+      fetchJson(`/api/p2p-spread?hours=${chartHours}`, { timeout: 30000 })
+    ]);
     document.getElementById('chartContent').innerHTML = `
       <div class="card">
-        <div class="section-head"><div><h2>BTC/USDT · ${chartHours} giờ gần nhất</h2><p>Số nến trả về: ${res.data.count} · ${sourcePill(res.source)}</p></div></div>
+        <div class="section-head"><div><h2>BTC/USDT + Giá BTC theo P2P · ${chartHours} giờ gần nhất</h2><p>Số nến: ${res.data.count} · OHLCV ${sourcePill(res.source)} · P2P ${sourcePill(p2pRes.source)}. Hai đường P2P được quy đổi: <code>giá BTC/USDT × giá USDT/VNĐ P2P</code>.</p></div></div>
         <div id="technicalChart" class="chart-box large"></div>
+        <p class="chart-note">Đường nến vẫn là BTC/USDT theo USD. Hai đường P2P dùng trục VNĐ bên phải để thể hiện giá mua/bán Bitcoin ước tính qua thị trường P2P.</p>
       </div>
     `;
-    drawTechnicalChart('technicalChart', res.data.data || []);
+    drawTechnicalChart('technicalChart', res.data.data || [], p2pRes.data.data || []);
   } catch (error) {
     document.getElementById('chartContent').innerHTML = errorBox(error.message);
   }
@@ -1165,7 +1178,7 @@ function aiResponseText(data) {
 
 async function askAI(question) {
   try {
-    const response = await fetch(`${API_BASE}/api/ai/ask`, {
+    const response = await fetch(apiUrl('/api/ai/ask'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader() },
       body: JSON.stringify({ question, risk_profile: 'moderate' })
@@ -1333,29 +1346,77 @@ function drawLineChart(id, data, field, name) {
   });
 }
 
-function drawTechnicalChart(id, data) {
+function hourKey(value) {
+  const date = parseTs(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString().slice(0, 13);
+}
+
+function buildP2PBtcSeries(ohlcvRows = [], p2pRows = []) {
+  const rows = Array.isArray(p2pRows) ? p2pRows : [];
+  const byTypeHour = new Map();
+
+  rows.forEach(row => {
+    const type = String(row.trade_type || '').toUpperCase();
+    const key = hourKey(row.timestamp);
+    if (!type || !key || !isNum(row.p2p_price)) return;
+    byTypeHour.set(`${type}:${key}`, row);
+  });
+
+  const compute = (ohlcv, type) => {
+    const row = byTypeHour.get(`${type}:${hourKey(ohlcv.timestamp)}`);
+    if (!row || !isNum(ohlcv.close) || !isNum(row.p2p_price)) return null;
+    return Math.round(ohlcv.close * row.p2p_price);
+  };
+
+  return {
+    sell: ohlcvRows.map(row => compute(row, 'SELL')),
+    buy: ohlcvRows.map(row => compute(row, 'BUY'))
+  };
+}
+
+function drawTechnicalChart(id, data, p2pRows = []) {
   const el = document.getElementById(id);
   if (!el || !window.echarts) return;
   const chart = echarts.init(el);
   charts.push(chart);
   const labels = data.map(d => formatVNTime(d.timestamp, 'short'));
   const candle = data.map(d => [d.open, d.close, d.low, d.high]);
+  const p2pBtc = buildP2PBtcSeries(data, p2pRows);
+  const hasP2PLine = p2pBtc.sell.some(isNum) || p2pBtc.buy.some(isNum);
+  const p2pLegend = hasP2PLine ? ['BTC P2P bán (VNĐ)', 'BTC P2P mua (VNĐ)'] : [];
+
   chart.setOption({
     animation: false,
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    legend: { top: 8, data: ['OHLC', 'EMA20', 'EMA50', 'EMA200', 'RSI'] },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      valueFormatter: value => {
+        if (!isNum(value)) return '—';
+        return value > 1_000_000 ? formatVND(value) : formatNumber(value, 2);
+      }
+    },
+    legend: { top: 8, data: ['OHLC', 'EMA20', 'EMA50', 'EMA200', ...p2pLegend, 'RSI'] },
     grid: [
-      { left: 48, right: 40, top: 48, height: 260 },
-      { left: 48, right: 40, top: 350, height: 90 }
+      { left: 54, right: hasP2PLine ? 96 : 42, top: 58, height: 250 },
+      { left: 54, right: hasP2PLine ? 96 : 42, top: 350, height: 90 }
     ],
     xAxis: [{ type: 'category', data: labels }, { type: 'category', data: labels, gridIndex: 1 }],
-    yAxis: [{ scale: true }, { gridIndex: 1, min: 0, max: 100 }],
+    yAxis: [
+      { scale: true, name: 'USD', axisLabel: { formatter: value => formatNumber(value, 0) } },
+      { gridIndex: 1, min: 0, max: 100 },
+      { scale: true, name: 'BTC/VNĐ P2P', position: 'right', axisLabel: { formatter: value => `${Math.round(value / 1_000_000)}tr` } }
+    ],
     dataZoom: [{ type: 'inside', xAxisIndex: [0, 1] }, { type: 'slider', xAxisIndex: [0, 1], bottom: 10 }],
     series: [
       { name: 'OHLC', type: 'candlestick', data: candle },
       { name: 'EMA20', type: 'line', smooth: true, showSymbol: false, data: data.map(d => d.ema_20 ?? null) },
       { name: 'EMA50', type: 'line', smooth: true, showSymbol: false, data: data.map(d => d.ema_50 ?? null) },
       { name: 'EMA200', type: 'line', smooth: true, showSymbol: false, data: data.map(d => d.ema_200 ?? null) },
+      ...(hasP2PLine ? [
+        { name: 'BTC P2P bán (VNĐ)', type: 'line', yAxisIndex: 2, smooth: true, showSymbol: false, data: p2pBtc.sell, lineStyle: { width: 2, type: 'dashed' } },
+        { name: 'BTC P2P mua (VNĐ)', type: 'line', yAxisIndex: 2, smooth: true, showSymbol: false, data: p2pBtc.buy, lineStyle: { width: 2, type: 'dotted' } }
+      ] : []),
       { name: 'RSI', type: 'line', xAxisIndex: 1, yAxisIndex: 1, showSymbol: false, data: data.map(d => d.rsi_14 ?? null), markLine: { symbol: 'none', data: [{ yAxis: 30 }, { yAxis: 70 }] } }
     ]
   });
@@ -1505,6 +1566,50 @@ function redirectAfterLoginIfNeeded() {
   }
 }
 
+function cleanupSupabaseAuthRedirectHash() {
+  const hash = window.location.hash || '';
+  const isSupabaseAuthHash =
+    hash.includes('access_token=') ||
+    hash.includes('refresh_token=') ||
+    hash.includes('type=magiclink') ||
+    hash.includes('error_code=otp_expired') ||
+    hash.includes('error=access_denied');
+
+  if (!isSupabaseAuthHash) return;
+
+  let message = 'Đã bỏ qua magic link cũ. Hệ thống hiện dùng mã OTP email nên token sẽ không còn nằm trên URL.';
+  try {
+    const params = new URLSearchParams(hash.replace(/^#/, ''));
+    const errorCode = params.get('error_code');
+    const description = params.get('error_description');
+    if (errorCode === 'otp_expired') {
+      message = 'Link email cũ đã hết hạn hoặc đã được dùng. Hãy dùng luồng mới: gửi mã OTP và nhập mã trong website.';
+    } else if (description) {
+      message = decodeURIComponent(description.replace(/\+/g, ' '));
+    }
+  } catch (_) { }
+
+  window.history.replaceState(
+    {},
+    document.title,
+    `${window.location.origin}${window.location.pathname}#login`
+  );
+
+  try {
+    sessionStorage.setItem('btc_bigdata_auth_notice', message);
+  } catch (_) { }
+}
+
+function consumeAuthNotice() {
+  try {
+    const notice = sessionStorage.getItem('btc_bigdata_auth_notice');
+    sessionStorage.removeItem('btc_bigdata_auth_notice');
+    return notice || '';
+  } catch (_) {
+    return '';
+  }
+}
+
 function renderAuthHeader() {
   ensureAuthBox();
   const el = getAuthBox();
@@ -1570,6 +1675,8 @@ function installAuthUxStyles() {
     .auth-tabs button.active { background:white; color:#0f172a; box-shadow:0 6px 22px rgba(15,23,42,.08); }
     .auth-mode-panel.hidden, .hidden { display:none !important; }
     .auth-actions-row { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }
+    .otp-box { margin-top:14px; padding:14px; border-radius:18px; border:1px solid rgba(37,99,235,.18); background:rgba(59,130,246,.06); }
+    .otp-box input { letter-spacing:.28em; font-weight:900; text-align:center; font-size:1.1rem; }
     .password-hint, .muted { color:#64748b; font-size:.92rem; }
     .side-nav { width:min(280px, 82vw); }
     .side-nav [data-route] { border-radius:14px; }
@@ -1639,19 +1746,53 @@ function installBitcoinAmbient() {
   document.body.appendChild(layer);
 }
 
+function isLiveNewsHidden() {
+  return localStorage.getItem(LIVE_NEWS_HIDDEN_KEY) === '1';
+}
+
+function hideLiveNewsTicker() {
+  localStorage.setItem(LIVE_NEWS_HIDDEN_KEY, '1');
+  document.getElementById('liveNewsTicker')?.remove();
+  document.body.classList.remove('has-live-news');
+  installNewsRestoreButton();
+  showToast('Đã ẩn thanh BTC News. Bạn có thể bật lại bằng nút “Hiện BTC News”.');
+}
+
+function showLiveNewsTicker() {
+  localStorage.removeItem(LIVE_NEWS_HIDDEN_KEY);
+  document.getElementById('liveNewsRestore')?.remove();
+  installLiveNewsTicker();
+  showToast('Đã bật lại thanh BTC News.');
+}
+
+function installNewsRestoreButton() {
+  if (!isLiveNewsHidden() || document.getElementById('liveNewsRestore')) return;
+  document.body.insertAdjacentHTML('beforeend', `
+    <button id="liveNewsRestore" class="live-news-restore" type="button" title="Hiện lại thanh tin tức BTC">₿ Hiện BTC News</button>
+  `);
+  document.getElementById('liveNewsRestore')?.addEventListener('click', showLiveNewsTicker);
+}
+
 function installLiveNewsTicker() {
+  if (isLiveNewsHidden()) {
+    document.body.classList.remove('has-live-news');
+    installNewsRestoreButton();
+    return;
+  }
   if (document.getElementById('liveNewsTicker')) return;
+  document.getElementById('liveNewsRestore')?.remove();
   document.body.insertAdjacentHTML('beforeend', `
     <aside id="liveNewsTicker" class="live-news-ticker" aria-label="Tin tức Bitcoin chạy">
       <button class="live-news-label" type="button" title="Mở trang tin tức">BTC News</button>
       <div class="live-news-track"><div id="liveNewsTrackInner" class="live-news-track-inner">Đang tải tin tức thị trường...</div></div>
       <button id="liveNewsPause" class="live-news-pause" type="button" aria-pressed="false" title="Tạm dừng/chạy ticker">Ⅱ</button>
+      <button id="liveNewsHide" class="live-news-hide" type="button" title="Ẩn thanh tin tức BTC">×</button>
     </aside>
   `);
   document.body.classList.add('has-live-news');
   document.querySelector('.live-news-label')?.addEventListener('click', () => { location.hash = '#news'; });
   document.getElementById('liveNewsTicker')?.addEventListener('click', event => {
-    if (event.target.closest('.live-news-pause') || event.target.closest('.live-news-label')) return;
+    if (event.target.closest('.live-news-pause') || event.target.closest('.live-news-label') || event.target.closest('.live-news-hide')) return;
     location.hash = '#news';
   });
   document.getElementById('liveNewsPause')?.addEventListener('click', () => {
@@ -1662,15 +1803,18 @@ function installLiveNewsTicker() {
     btn.setAttribute('aria-pressed', String(paused));
     btn.textContent = paused ? '▶' : 'Ⅱ';
   });
+  document.getElementById('liveNewsHide')?.addEventListener('click', hideLiveNewsTicker);
   refreshLiveNewsTicker();
-  setInterval(refreshLiveNewsTicker, 10 * 60_000);
+  setInterval(() => {
+    if (!isLiveNewsHidden()) refreshLiveNewsTicker();
+  }, 10 * 60_000);
 }
 
 async function refreshLiveNewsTicker() {
   const inner = document.getElementById('liveNewsTrackInner');
   if (!inner) return;
   try {
-    const res = await fetchJson('/api/news/latest?limit=8', { timeout: 6500 });
+    const res = await fetchJson('/api/news/latest?limit=8', { timeout: 30000 });
     const items = (res.data.data || []).slice(0, 8);
     if (!items.length) throw new Error('Không có tin');
     const html = items.map(item => `<span><b>₿</b> ${escapeHTML(item.title)} <em>${escapeHTML(item.source || '')}</em></span>`).join('');
@@ -1957,18 +2101,19 @@ function ageText(hours) {
 
 function renderLoginPage() {
   const next = getLoginNextRoute();
+  const authNotice = consumeAuthNotice();
 
   app.innerHTML = `
     <section class="auth-shell">
       <div class="auth-panel auth-copy">
         <span class="eyebrow">BTC BigData Account</span>
         <h1>Tài khoản an toàn cho lịch sử, cảnh báo và mua gói</h1>
-        <p class="lead">Đăng ký theo luồng bảo mật: xác thực email bằng Supabase Magic Link trước, sau đó mới đặt mật khẩu để dùng lâu dài.</p>
+        <p class="lead">Đăng ký theo luồng mới: website gửi mã OTP 6 số qua email, người dùng nhập mã ngay trên trang. Token không còn xuất hiện trên thanh địa chỉ như magic link.</p>
         <div class="auth-steps">
           <div><b>1</b><span>Nhập email</span></div>
-          <div><b>2</b><span>Bấm magic link trong email</span></div>
-          <div><b>3</b><span>Đặt mật khẩu</span></div>
-          <div><b>4</b><span>Dữ liệu lưu riêng theo tài khoản</span></div>
+          <div><b>2</b><span>Nhận mã OTP 6 số</span></div>
+          <div><b>3</b><span>Nhập mã trên website</span></div>
+          <div><b>4</b><span>Đặt mật khẩu để dùng lâu dài</span></div>
         </div>
       </div>
 
@@ -1982,6 +2127,7 @@ function renderLoginPage() {
             <a class="btn secondary" href="#account">Quản lý tài khoản</a>
           </div>
         ` : `
+          ${authNotice ? `<div class="state-box warn">${escapeHTML(authNotice)}</div>` : ''}
           ${!supabaseAuth ? `
             <div class="state-box error">
               Chưa cấu hình Supabase Auth. Hãy thêm <code>VITE_SUPABASE_URL</code> và <code>VITE_SUPABASE_ANON_KEY</code> vào <code>frontend/.env</code>, sau đó chạy lại <code>npm run dev</code>.
@@ -1995,18 +2141,26 @@ function renderLoginPage() {
 
           <div id="registerPanel" class="auth-mode-panel">
             <h2>Tạo tài khoản</h2>
-            <p class="muted">Không đặt mật khẩu ngay. Hệ thống sẽ gửi magic link để xác thực email trước.</p>
+            <p class="muted">Hệ thống gửi mã OTP qua email. Bạn nhập mã tại đây để xác thực, không cần bấm link nên tránh token nằm trên URL.</p>
             <div class="field"><label>Email</label><input id="registerEmail" type="email" placeholder="you@example.com" autocomplete="email"></div>
-            <button id="registerSubmit" class="btn primary full" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Gửi magic link xác thực</button>
+            <button id="registerSubmit" class="btn primary full" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Gửi mã OTP xác thực</button>
+            <div id="registerOtpBox" class="otp-box hidden">
+              <div class="field"><label>Mã OTP trong email</label><input id="registerOtp" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="123456" autocomplete="one-time-code"></div>
+              <button id="registerOtpVerify" class="btn secondary full" type="button">Xác nhận mã OTP</button>
+            </div>
           </div>
 
           <div id="loginPanel" class="auth-mode-panel hidden">
             <h2>Đăng nhập</h2>
-            <p class="muted">Dùng mật khẩu sau khi đã xác thực email và đặt mật khẩu lần đầu.</p>
+            <p class="muted">Ưu tiên đăng nhập bằng mật khẩu. Nếu quên hoặc chưa đặt mật khẩu, dùng mã OTP qua email.</p>
             <div class="field"><label>Email</label><input id="loginEmail" type="email" placeholder="you@example.com" autocomplete="email"></div>
             <div class="field"><label>Mật khẩu</label><input id="loginPassword" type="password" placeholder="••••••••" autocomplete="current-password"></div>
-            <button id="passwordLoginSubmit" class="btn primary full" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Đăng nhập</button>
-            <button id="magicLoginSubmit" class="btn secondary full" style="margin-top:10px" ${!supabaseAuth ? 'disabled' : ''}>Gửi magic link thay thế</button>
+            <button id="passwordLoginSubmit" class="btn primary full" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Đăng nhập bằng mật khẩu</button>
+            <button id="otpLoginSubmit" class="btn secondary full" style="margin-top:10px" ${!supabaseAuth ? 'disabled' : ''}>Gửi mã OTP qua email</button>
+            <div id="loginOtpBox" class="otp-box hidden">
+              <div class="field"><label>Mã OTP trong email</label><input id="loginOtp" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="123456" autocomplete="one-time-code"></div>
+              <button id="loginOtpVerify" class="btn secondary full" type="button">Xác nhận mã OTP</button>
+            </div>
           </div>
 
           <div id="loginResult"></div>
@@ -2016,8 +2170,10 @@ function renderLoginPage() {
   `;
 
   setupAuthTabs();
-  document.getElementById('registerSubmit')?.addEventListener('click', () => requestMagicLink('register', next));
-  document.getElementById('magicLoginSubmit')?.addEventListener('click', () => requestMagicLink('login', next));
+  document.getElementById('registerSubmit')?.addEventListener('click', () => requestEmailOtp('register', next));
+  document.getElementById('otpLoginSubmit')?.addEventListener('click', () => requestEmailOtp('login', next));
+  document.getElementById('registerOtpVerify')?.addEventListener('click', () => verifyEmailOtp('register', next));
+  document.getElementById('loginOtpVerify')?.addEventListener('click', () => verifyEmailOtp('login', next));
   document.getElementById('passwordLoginSubmit')?.addEventListener('click', () => signInWithPasswordUI(next));
 }
 
@@ -2032,8 +2188,10 @@ function setupAuthTabs() {
   }));
 }
 
-async function requestMagicLink(mode, next = 'dashboard') {
+async function requestEmailOtp(mode, next = 'dashboard') {
   const inputId = mode === 'register' ? 'registerEmail' : 'loginEmail';
+  const boxId = mode === 'register' ? 'registerOtpBox' : 'loginOtpBox';
+  const otpInputId = mode === 'register' ? 'registerOtp' : 'loginOtp';
   const email = document.getElementById(inputId)?.value.trim();
   const result = document.getElementById('loginResult');
 
@@ -2047,20 +2205,63 @@ async function requestMagicLink(mode, next = 'dashboard') {
   }
 
   setPendingNextRoute(mode === 'register' ? 'set-password' : next);
-  result.innerHTML = `<div class="state-box empty">Đang gửi magic link xác thực...</div>`;
+  result.innerHTML = `<div class="state-box empty">Đang gửi mã OTP tới email...</div>`;
 
-  const redirectTo = `${window.location.origin}${window.location.pathname}`;
   const { error } = await supabaseAuth.auth.signInWithOtp({
     email,
     options: {
-      emailRedirectTo: redirectTo,
       shouldCreateUser: mode === 'register'
     }
   });
 
-  result.innerHTML = error
-    ? `<div class="state-box error">${escapeHTML(error.message)}</div>`
-    : `<div class="state-box empty"><b>Đã gửi magic link tới ${escapeHTML(email)}.</b><br>Hãy mở email và bấm link xác thực. Sau khi quay lại web, hệ thống sẽ yêu cầu bạn đặt mật khẩu.</div>`;
+  if (error) {
+    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}</div>`;
+    return;
+  }
+
+  const otpBox = document.getElementById(boxId);
+  otpBox?.classList.remove('hidden');
+  otpBox?.setAttribute('data-email', email);
+  document.getElementById(otpInputId)?.focus();
+
+  result.innerHTML = `<div class="state-box empty"><b>Đã gửi mã OTP tới ${escapeHTML(email)}.</b><br>Nhập mã 6 số trong email để xác thực. Không bấm link magic link nếu email template vẫn còn link cũ.</div>`;
+}
+
+async function verifyEmailOtp(mode, next = 'dashboard') {
+  const inputId = mode === 'register' ? 'registerEmail' : 'loginEmail';
+  const otpInputId = mode === 'register' ? 'registerOtp' : 'loginOtp';
+  const boxId = mode === 'register' ? 'registerOtpBox' : 'loginOtpBox';
+  const result = document.getElementById('loginResult');
+  const email = document.getElementById(inputId)?.value.trim() || document.getElementById(boxId)?.dataset.email || '';
+  const token = (document.getElementById(otpInputId)?.value || '').replace(/\s+/g, '').trim();
+
+  if (!email) {
+    result.innerHTML = `<div class="state-box error">Vui lòng nhập email trước khi xác nhận OTP.</div>`;
+    return;
+  }
+  if (!/^\d{6}$/.test(token)) {
+    result.innerHTML = `<div class="state-box error">Mã OTP thường gồm 6 chữ số. Vui lòng kiểm tra lại email.</div>`;
+    return;
+  }
+
+  result.innerHTML = `<div class="state-box empty">Đang xác thực mã OTP...</div>`;
+
+  const { data, error } = await supabaseAuth.auth.verifyOtp({
+    email,
+    token,
+    type: 'email'
+  });
+
+  if (error) {
+    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu mã đã hết hạn, hãy bấm gửi lại mã OTP mới.</small></div>`;
+    return;
+  }
+
+  currentSession = data.session || null;
+  await syncCurrentUserProfile();
+  renderAuthHeader();
+  showToast('Xác thực email thành công.');
+  location.hash = needsPasswordSetup() ? '#set-password' : `#${next}`;
 }
 
 async function signInWithPasswordUI(next = 'dashboard') {
@@ -2077,7 +2278,7 @@ async function signInWithPasswordUI(next = 'dashboard') {
   const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
 
   if (error) {
-    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu bạn chưa đặt mật khẩu, hãy dùng nút gửi magic link.</small></div>`;
+    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu bạn chưa đặt mật khẩu, hãy dùng nút gửi mã OTP qua email.</small></div>`;
     return;
   }
 
