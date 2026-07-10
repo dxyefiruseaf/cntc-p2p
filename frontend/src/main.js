@@ -1,5 +1,6 @@
 import './styles.css';
 import { createClient } from '@supabase/supabase-js';
+import QRCode from 'qrcode';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/+$/, '');
 const LIVE_NEWS_HIDDEN_KEY = 'btc_bigdata_live_news_hidden_v1';
@@ -37,7 +38,7 @@ let chatMessages = [
 let orders = [];
 let currentSession = null;
 let authReady = !supabaseAuth;
-const protectedRoutes = new Set(['history', 'alerts', 'billing', 'set-password', 'account']);
+const protectedRoutes = new Set(['history', 'alerts', 'billing', 'wallet', 'set-password', 'account']);
 const trustRoutes = new Set(['dashboard', 'chart', 'p2p', 'tax', 'settlement', 'chat', 'risk', 'news', 'reliability']);
 
 const signalMap = {
@@ -65,6 +66,7 @@ const routes = {
   history: renderHistoryPage,
   alerts: renderAlertsPage,
   billing: renderBillingPage,
+  wallet: renderWalletPage,
   login: renderLoginPage,
   'set-password': renderSetPasswordPage,
   account: renderAccountPage,
@@ -304,6 +306,7 @@ function mockFor(endpoint) {
   if (endpoint.startsWith('/api/p2p-comparison')) return buildMockP2PComparison();
   if (endpoint.startsWith('/api/news/latest')) return buildMockNews();
   if (endpoint.startsWith('/api/ai/history')) return window.MOCK_DATA.aiHistory || { count: 0, data: [] };
+  if (endpoint.startsWith('/api/wallet/me')) return { wallet: { balance_vnd: 100000, balance_usdt_demo: 0 }, transactions: [], sandbox: true, disclaimer: 'Ví demo fallback khi backend chưa sẵn sàng.' };
   return null;
 }
 
@@ -2407,6 +2410,7 @@ function renderAccountPage() {
           <li><code>demo_trades</code>: giao dịch demo theo user.</li>
           <li><code>alert_rules</code>: cảnh báo email theo user.</li>
           <li><code>orders</code> và <code>subscriptions</code>: gói thanh toán theo user.</li>
+          <li><code>wallets</code>, <code>wallet_topups</code>, <code>wallet_transactions</code>: ví demo, nạp QR và lịch sử biến động số dư.</li>
         </ul>
       </div>
     </section>
@@ -2521,12 +2525,172 @@ async function loadAlertsUI() {
   } catch (error) { box.innerHTML = errorBox(error.message); }
 }
 
+
+function walletStatusBadge(status) {
+  const value = String(status || 'pending').toLowerCase();
+  if (value === 'success') return '<span class="badge green">Thành công</span>';
+  if (value === 'failed') return '<span class="badge red">Thất bại</span>';
+  return '<span class="badge amber">Đang chờ</span>';
+}
+
+function walletTransactionHTML(row) {
+  const amount = Number(row.amount_vnd || 0);
+  const sign = amount > 0 ? '+' : '';
+  return `
+    <div class="order-row wallet-tx-row">
+      <div>
+        <strong>${escapeHTML(row.description || row.type || 'Giao dịch ví')}</strong>
+        <div class="meta">${formatVNTime(row.created_at)}${row.ref_id ? ` · ${escapeHTML(row.ref_id)}` : ''}</div>
+      </div>
+      <div class="wallet-tx-amount ${amount >= 0 ? 'positive' : 'negative'}">
+        ${sign}${formatVND(amount)}
+        <small>Sau GD: ${row.balance_after_vnd == null ? '—' : formatVND(row.balance_after_vnd)}</small>
+      </div>
+    </div>`;
+}
+
+async function renderWalletPage() {
+  const params = new URLSearchParams((location.hash.split('?')[1] || ''));
+  const txnRef = params.get('txn_ref');
+  const paid = params.get('wallet_paid');
+  const verified = params.get('verified');
+  app.innerHTML = `
+    <section class="page-head">
+      <div>
+        <span class="eyebrow">Ví điện tử demo</span>
+        <h1>Nạp ví bằng QR Code demo không mất phí</h1>
+        <p class="lead">Mô phỏng ví điện tử và thanh toán QR trong phạm vi học phần. Mã QR chỉ dùng để minh họa, không mở giao dịch ngân hàng thật.</p>
+      </div>
+      <div class="page-actions"><a class="btn secondary" href="#billing">Mua gói Sandbox</a></div>
+    </section>
+    ${txnRef ? `<section class="state-box ${paid === '1' ? 'success' : 'error'}"><strong>Kết quả nạp ví:</strong> ${paid === '1' ? 'Giao dịch thành công.' : 'Giao dịch thất bại hoặc chưa xác thực.'} <span class="meta">TxnRef: ${escapeHTML(txnRef)} · chữ ký ${verified === '1' ? 'hợp lệ' : 'không hợp lệ'}</span></section>` : ''}
+    <section class="wallet-grid">
+      <div class="card wallet-balance-card" id="walletBalanceCard">${loadingCard(120)}</div>
+      <div class="card">
+        <span class="badge blue">QR Demo</span>
+        <h2>Nạp ví demo không mất phí</h2>
+        <p class="meta">Tạo QR nội bộ cho bài học. Sau khi quét/quan sát QR, bấm “Xác nhận thanh toán demo” để cộng số dư ví.</p>
+        <div class="quick-amounts" id="walletQuickAmounts">
+          <button class="btn small secondary" data-wallet-amount="10000">10.000đ</button>
+          <button class="btn small secondary" data-wallet-amount="50000">50.000đ</button>
+          <button class="btn small secondary" data-wallet-amount="100000">100.000đ</button>
+          <button class="btn small secondary" data-wallet-amount="500000">500.000đ</button>
+        </div>
+        <div class="field" style="margin-top:12px"><label>Số tiền muốn nạp</label><input id="walletAmount" type="number" min="10000" step="10000" value="50000"></div>
+        <button id="walletCreateTopup" class="btn primary full" style="margin-top:14px">Tạo QR nạp ví</button>
+      </div>
+      <div class="card wallet-qr-card" id="walletQrCard">
+        <span class="badge neutral">Chưa tạo QR</span>
+        <h3>QR Code thanh toán</h3>
+        <div class="qr-placeholder">Nhập số tiền và bấm “Tạo QR nạp ví”.</div>
+      </div>
+      <div class="card">
+        <h3>Lịch sử ví</h3>
+        <div id="walletTransactions">${loadingCard(180)}</div>
+      </div>
+    </section>
+    <section class="card">
+      <h3>Liên hệ học phần</h3>
+      <div class="feature-grid compact">
+        <div><strong>Ví điện tử</strong><span>Nạp tiền vào tài khoản trực tuyến và dùng số dư để thanh toán dịch vụ demo.</span></div>
+        <div><strong>QR Code</strong><span>Minh họa thanh toán không tiếp xúc qua mã QR thay cho tiền mặt.</span></div>
+        <div><strong>Payment Gateway</strong><span>Project hỗ trợ chế độ demo nội bộ không mất phí; có thể chuyển sang VNPay Sandbox khi có key test.</span></div>
+      </div>
+    </section>`;
+  document.querySelectorAll('[data-wallet-amount]').forEach(btn => btn.addEventListener('click', () => {
+    document.getElementById('walletAmount').value = btn.dataset.walletAmount;
+  }));
+  document.getElementById('walletCreateTopup').addEventListener('click', createWalletTopupUI);
+  await loadWalletUI();
+}
+
+async function loadWalletUI() {
+  const balanceBox = document.getElementById('walletBalanceCard');
+  const txBox = document.getElementById('walletTransactions');
+  if (!balanceBox || !txBox) return;
+  try {
+    const res = await fetchJson('/api/wallet/me');
+    const wallet = res.data.wallet || {};
+    const rows = res.data.transactions || [];
+    balanceBox.innerHTML = `
+      <span class="badge violet">Số dư demo</span>
+      <h2>${formatVND(Number(wallet.balance_vnd || 0))}</h2>
+      <p>USDT demo: <strong>${formatNumber(Number(wallet.balance_usdt_demo || 0), 4)} USDT</strong></p>
+      <p class="meta">${escapeHTML(res.data.disclaimer || 'Ví demo phục vụ học phần, không phát sinh tiền thật.')}</p>`;
+    txBox.innerHTML = rows.length ? rows.map(walletTransactionHTML).join('') : `<div class="state-box empty">Chưa có giao dịch ví.</div>`;
+  } catch (error) {
+    balanceBox.innerHTML = errorBox(error.message);
+    txBox.innerHTML = errorBox(error.message);
+  }
+}
+
+async function createWalletTopupUI() {
+  const amount = Number(document.getElementById('walletAmount').value);
+  const qrCard = document.getElementById('walletQrCard');
+  if (!Number.isFinite(amount) || amount < 10000) {
+    showToast('Số tiền nạp tối thiểu là 10.000đ.');
+    return;
+  }
+  qrCard.innerHTML = `<span class="badge amber">Đang tạo</span><h3>QR Code demo</h3>${loadingCard(180)}`;
+  try {
+    const res = await fetchJson('/api/wallet/topup/create', { method: 'POST', body: { amount_vnd: amount }, timeout: 30000 });
+    const paymentMode = res.data.payment_mode || 'demo';
+    const isDemo = paymentMode === 'demo';
+    const qrPayload = res.data.qr_payload || res.data.payment_url || res.data.txn_ref;
+    const qrDataUrl = await QRCode.toDataURL(qrPayload, { margin: 2, scale: 7 });
+    qrCard.innerHTML = `
+      <span class="badge ${isDemo ? 'violet' : 'green'}">${isDemo ? 'Demo không mất phí' : 'VNPay Sandbox'}</span>
+      <h3>Nạp ${formatVND(amount)}</h3>
+      <div class="wallet-qr-wrap"><img src="${qrDataUrl}" alt="QR nạp ví demo"></div>
+      <p class="meta">TxnRef: ${escapeHTML(res.data.txn_ref)} · ${isDemo ? 'QR nội bộ phục vụ minh họa học phần, không dùng app ngân hàng thật.' : 'QR chứa payment URL của VNPay Sandbox.'}</p>
+      ${isDemo ? `
+        <button class="btn primary full" id="walletDemoConfirm">Xác nhận thanh toán demo, không mất phí</button>
+        <p class="meta">Nút này mô phỏng payment gateway trả kết quả thành công và cộng số dư ví demo.</p>
+      ` : `
+        <a class="btn primary full" href="${res.data.payment_url}" target="_blank" rel="noopener">Mở trang thanh toán Sandbox</a>
+      `}
+      <button class="btn secondary full" id="walletCheckTopup" style="margin-top:10px">Kiểm tra trạng thái</button>`;
+    document.getElementById('walletCheckTopup').addEventListener('click', async () => {
+      await checkWalletTopupStatus(res.data.txn_ref);
+    });
+    document.getElementById('walletDemoConfirm')?.addEventListener('click', async () => {
+      await confirmWalletTopupDemo(res.data.txn_ref);
+    });
+  } catch (error) {
+    qrCard.innerHTML = `<span class="badge red">Lỗi</span><h3>Không tạo được QR</h3>${errorBox(error.message)}<p class="meta">Kiểm tra đăng nhập, Supabase và bảng ví. Chế độ mặc định là demo không mất phí nên không cần key VNPay.</p>`;
+  }
+}
+
+async function confirmWalletTopupDemo(txnRef) {
+  try {
+    const res = await fetchJson('/api/wallet/topup/demo-confirm', { method: 'POST', body: { txn_ref: txnRef }, timeout: 30000 });
+    showToast(res.data.message || 'Đã xác nhận thanh toán demo.');
+    await loadWalletUI();
+    const qrCard = document.getElementById('walletQrCard');
+    if (qrCard) {
+      qrCard.insertAdjacentHTML('afterbegin', `<div class="state-box success"><strong>Đã cộng ví demo.</strong> Giao dịch này không phát sinh tiền thật.</div>`);
+    }
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function checkWalletTopupStatus(txnRef) {
+  try {
+    const res = await fetchJson(`/api/wallet/topup/status?txn_ref=${encodeURIComponent(txnRef)}`);
+    showToast(`Trạng thái nạp ví: ${res.data.status}`);
+    await loadWalletUI();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 function renderBillingPage() {
   app.innerHTML = `
     <section class="page-head"><div><span class="eyebrow">VNPay Sandbox</span><h1>Mua gói Premium thử nghiệm</h1><p class="lead">Đây là môi trường thử nghiệm Sandbox của VNPay — dùng để minh hoạ, không phát sinh tiền thật.</p></div></section>
     <section class="grid two">
       <div class="card"><span class="badge neutral">Free</span><h2>Gói miễn phí</h2><p>Dashboard, P2P, thuế và chat AI cơ bản.</p></div>
-      <div class="card"><span class="badge violet">Premium Sandbox</span><h2>49.000đ/tháng</h2><p>Cảnh báo nâng cao, lịch sử sâu, nhiều kịch bản AI hơn.</p><button id="buyPremium" class="btn primary full" style="margin-top:14px">Nâng cấp qua VNPay Sandbox</button></div>
+      <div class="card"><span class="badge violet">Premium Sandbox</span><h2>49.000đ/tháng</h2><p>Cảnh báo nâng cao, lịch sử sâu, nhiều kịch bản AI hơn.</p><button id="buyPremium" class="btn primary full" style="margin-top:14px">Nâng cấp qua VNPay Sandbox</button><a class="btn secondary full" href="#wallet" style="margin-top:10px">Nạp ví demo bằng QR Code</a></div>
     </section>`;
   document.getElementById('buyPremium').addEventListener('click', async () => {
     try {

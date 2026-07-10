@@ -239,3 +239,135 @@ def upsert_subscription(row: dict[str, Any]) -> None:
     if sb is None:
         return
     sb.table(SUBSCRIPTIONS_TABLE).upsert(row, on_conflict="user_id,plan_id").execute()
+
+# ---------------------------------------------------------------------------
+# Wallet demo repositories: QR top-up + e-wallet balance for course sandbox
+# ---------------------------------------------------------------------------
+
+WALLETS_TABLE = "wallets"
+WALLET_TOPUPS_TABLE = "wallet_topups"
+WALLET_TRANSACTIONS_TABLE = "wallet_transactions"
+
+
+def _num(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def get_wallet_for_user(user_id: str) -> dict[str, Any]:
+    sb = _client()
+    if sb is None:
+        return {"user_id": user_id, "balance_vnd": 0, "balance_usdt_demo": 0}
+    res = sb.table(WALLETS_TABLE).select("*").eq("user_id", user_id).limit(1).execute()
+    if res.data:
+        return res.data[0]
+    created = sb.table(WALLETS_TABLE).insert({"user_id": user_id, "balance_vnd": 0, "balance_usdt_demo": 0}).execute()
+    return created.data[0] if created.data else {"user_id": user_id, "balance_vnd": 0, "balance_usdt_demo": 0}
+
+
+def create_wallet_topup(row: dict[str, Any], upsert: bool = False) -> dict[str, Any] | None:
+    sb = _client()
+    if sb is None:
+        return None
+    if upsert:
+        res = sb.table(WALLET_TOPUPS_TABLE).upsert(row, on_conflict="vnp_txn_ref").execute()
+    else:
+        res = sb.table(WALLET_TOPUPS_TABLE).insert(row).execute()
+    return res.data[0] if res.data else None
+
+
+def get_wallet_topup_by_txn_ref(txn_ref: str) -> dict[str, Any] | None:
+    sb = _client()
+    if sb is None:
+        return None
+    res = sb.table(WALLET_TOPUPS_TABLE).select("*").eq("vnp_txn_ref", txn_ref).limit(1).execute()
+    return res.data[0] if res.data else None
+
+
+def list_wallet_transactions(user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    sb = _client()
+    if sb is None:
+        return []
+    res = (
+        sb.table(WALLET_TRANSACTIONS_TABLE)
+        .select("id,user_id,type,amount_vnd,balance_after_vnd,description,ref_id,created_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return res.data or []
+
+
+def _insert_wallet_transaction(row: dict[str, Any]) -> dict[str, Any] | None:
+    sb = _client()
+    if sb is None:
+        return None
+    res = sb.table(WALLET_TRANSACTIONS_TABLE).insert(row).execute()
+    return res.data[0] if res.data else None
+
+
+def mark_wallet_topup_success(txn_ref: str) -> dict[str, Any] | None:
+    """Idempotently mark a top-up successful and credit the demo wallet."""
+    sb = _client()
+    if sb is None:
+        return None
+    topup = get_wallet_topup_by_txn_ref(txn_ref)
+    if not topup:
+        return None
+    if topup.get("status") == "success":
+        return topup
+
+    user_id = str(topup["user_id"])
+    amount = _num(topup.get("amount_vnd"))
+    wallet = get_wallet_for_user(user_id)
+    new_balance = _num(wallet.get("balance_vnd")) + amount
+
+    paid_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    sb.table(WALLETS_TABLE).update({"balance_vnd": new_balance, "updated_at": paid_at}).eq("user_id", user_id).execute()
+    updated = sb.table(WALLET_TOPUPS_TABLE).update({"status": "success", "paid_at": paid_at}).eq("vnp_txn_ref", txn_ref).execute()
+    _insert_wallet_transaction({
+        "user_id": user_id,
+        "type": "topup",
+        "amount_vnd": amount,
+        "balance_after_vnd": new_balance,
+        "description": "Nạp ví demo qua VNPay Sandbox QR",
+        "ref_id": txn_ref,
+    })
+    return updated.data[0] if updated.data else topup
+
+
+def mark_wallet_topup_failed(txn_ref: str) -> dict[str, Any] | None:
+    sb = _client()
+    if sb is None:
+        return None
+    res = sb.table(WALLET_TOPUPS_TABLE).update({"status": "failed"}).eq("vnp_txn_ref", txn_ref).execute()
+    return res.data[0] if res.data else None
+
+
+def debit_wallet_for_payment(user_id: str, amount_vnd: int | float, description: str, ref_id: str | None = None) -> dict[str, Any]:
+    """Demo-only debit helper. Raises ValueError if balance is insufficient."""
+    sb = _client()
+    if sb is None:
+        raise ValueError("Supabase chưa được cấu hình")
+    wallet = get_wallet_for_user(user_id)
+    current = _num(wallet.get("balance_vnd"))
+    amount = _num(amount_vnd)
+    if current < amount:
+        raise ValueError("Số dư ví demo không đủ")
+    new_balance = current - amount
+    updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    sb.table(WALLETS_TABLE).update({"balance_vnd": new_balance, "updated_at": updated_at}).eq("user_id", user_id).execute()
+    tx = _insert_wallet_transaction({
+        "user_id": user_id,
+        "type": "payment",
+        "amount_vnd": -amount,
+        "balance_after_vnd": new_balance,
+        "description": description,
+        "ref_id": ref_id,
+    })
+    return {"wallet": get_wallet_for_user(user_id), "transaction": tx}

@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     vnpay_hash_secret: str | None = None
     vnpay_pay_url: str = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"
     vnpay_return_url: str = "http://localhost:8000/api/payment/return"
+    vnpay_wallet_return_url: str | None = None
+
+    # Demo payment mode for coursework: create QR + confirm internally, no real bank/payment app needed.
+    wallet_demo_payment_enabled: bool = True
 
     admin_seed_token: str = "change-me"
 

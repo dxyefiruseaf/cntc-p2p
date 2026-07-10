@@ -70,3 +70,24 @@ create policy "user reads own orders" on public.orders
 drop policy if exists "user reads own subscriptions" on public.subscriptions;
 create policy "user reads own subscriptions" on public.subscriptions
   for select using (auth.uid() = user_id);
+
+-- ---------------------------------------------------------------------------
+-- Feature upgrade v2 RLS: Demo e-wallet
+-- Backend vẫn dùng SERVICE_ROLE_KEY; policies cho phép user đọc dữ liệu của mình nếu cần.
+-- ---------------------------------------------------------------------------
+
+alter table public.wallets enable row level security;
+alter table public.wallet_topups enable row level security;
+alter table public.wallet_transactions enable row level security;
+
+drop policy if exists "user reads own wallet" on public.wallets;
+create policy "user reads own wallet" on public.wallets
+  for select using (auth.uid() = user_id);
+
+drop policy if exists "user reads own wallet topups" on public.wallet_topups;
+create policy "user reads own wallet topups" on public.wallet_topups
+  for select using (auth.uid() = user_id);
+
+drop policy if exists "user reads own wallet transactions" on public.wallet_transactions;
+create policy "user reads own wallet transactions" on public.wallet_transactions
+  for select using (auth.uid() = user_id);

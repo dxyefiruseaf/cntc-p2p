@@ -155,3 +155,43 @@ create table if not exists public.subscriptions (
     expires_at timestamptz,
     primary key (user_id, plan_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- Feature upgrade v2: Demo e-wallet + QR Code top-up via VNPay Sandbox
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.wallets (
+    user_id uuid primary key references auth.users(id) on delete cascade,
+    balance_vnd numeric not null default 0 check (balance_vnd >= 0),
+    balance_usdt_demo numeric not null default 0 check (balance_usdt_demo >= 0),
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create table if not exists public.wallet_topups (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid not null references auth.users(id) on delete cascade,
+    amount_vnd numeric not null check (amount_vnd > 0),
+    vnp_txn_ref text unique not null,
+    status text not null default 'pending' check (status in ('pending', 'success', 'failed')),
+    payment_url text null,
+    created_at timestamptz not null default now(),
+    paid_at timestamptz null
+);
+
+create index if not exists idx_wallet_topups_user_created_at_desc
+    on public.wallet_topups (user_id, created_at desc);
+
+create table if not exists public.wallet_transactions (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid not null references auth.users(id) on delete cascade,
+    type text not null check (type in ('topup', 'payment', 'refund', 'adjustment')),
+    amount_vnd numeric not null,
+    balance_after_vnd numeric null,
+    description text null,
+    ref_id text null,
+    created_at timestamptz not null default now()
+);
+
+create index if not exists idx_wallet_transactions_user_created_at_desc
+    on public.wallet_transactions (user_id, created_at desc);

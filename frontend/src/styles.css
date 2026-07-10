@@ -1002,3 +1002,47 @@ body.has-live-news .app-shell { padding-top: calc(var(--topbar) + 78px); }
   .news-card { animation: none !important; transition: none !important; }
   .live-news-track-inner { animation-duration: 120s !important; }
 }
+
+/* Wallet demo + QR payment */
+.wallet-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, .85fr) minmax(320px, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+.wallet-balance-card h2 {
+  margin: 12px 0 6px;
+  font-size: clamp(2rem, 5vw, 3.3rem);
+  letter-spacing: -.06em;
+}
+.quick-amounts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.wallet-qr-card { min-height: 360px; }
+.qr-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  border: 1px dashed var(--border-2);
+  border-radius: var(--radius-lg);
+  background: var(--card-soft);
+  color: var(--muted);
+  font-weight: 760;
+  text-align: center;
+  padding: 20px;
+}
+.wallet-qr-wrap {
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, #fff, var(--card-soft));
+  margin: 12px 0;
+}
+.wallet-qr-wrap img { width: min(270px, 100%); height: auto; border-radius: 16px; }
+.wallet-tx-row { align-items: center; }
+.wallet-tx-amount { text-align: right; font-weight: 900; }
+.wallet-tx-amount small { display: block; margin-top: 2px; color: var(--muted); font-weight: 760; }
+.wallet-tx-amount.positive { color: var(--green); }
+.wallet-tx-amount.negative { color: var(--red); }
+.feature-grid.compact div span { display:block; margin-top:6px; color:var(--muted); font-size:.9rem; }
+@media (max-width: 980px) { .wallet-grid { grid-template-columns: 1fr; } }
