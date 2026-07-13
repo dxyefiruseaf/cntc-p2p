@@ -2260,11 +2260,15 @@ async function verifyEmailOtp(mode, next = 'dashboard') {
     return;
   }
 
+  result.innerHTML = `<div class="state-box" style="border-color: #bbf7d0; background: #f0fdf4; color: #166534;">Xác thực thành công! Đang chuyển hướng...</div>`;
   currentSession = data.session || null;
   await syncCurrentUserProfile();
   renderAuthHeader();
   showToast('Xác thực email thành công.');
-  location.hash = needsPasswordSetup() ? '#set-password' : `#${next}`;
+  
+  let nextRoute = needsPasswordSetup() ? 'set-password' : next;
+  if (location.hash === `#${nextRoute}`) route();
+  else location.hash = `#${nextRoute}`;
 }
 
 async function signInWithPasswordUI(next = 'dashboard') {
@@ -2285,11 +2289,15 @@ async function signInWithPasswordUI(next = 'dashboard') {
     return;
   }
 
+  result.innerHTML = `<div class="state-box" style="border-color: #bbf7d0; background: #f0fdf4; color: #166534;">Đăng nhập thành công! Đang chuyển hướng...</div>`;
   currentSession = data.session || null;
   await syncCurrentUserProfile();
   renderAuthHeader();
   showToast('Đăng nhập thành công.');
-  location.hash = needsPasswordSetup() ? '#set-password' : `#${next}`;
+  
+  let nextRoute = needsPasswordSetup() ? 'set-password' : next;
+  if (location.hash === `#${nextRoute}`) route();
+  else location.hash = `#${nextRoute}`;
 }
 
 function needsPasswordSetup() {
@@ -2350,23 +2358,36 @@ async function setPasswordUI() {
   }
 
   result.innerHTML = `<div class="state-box empty">Đang lưu mật khẩu...</div>`;
-  const { data, error } = await supabaseAuth.auth.updateUser({
-    password,
-    data: { password_set: true }
-  });
+  try {
+    const { data, error } = await supabaseAuth.auth.updateUser({
+      password,
+      data: { password_set: true }
+    });
 
-  if (error) {
-    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}</div>`;
-    return;
+    if (error) {
+      result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}</div>`;
+      return;
+    }
+
+    result.innerHTML = `<div class="state-box" style="border-color: #bbf7d0; background: #f0fdf4; color: #166534;">Đã lưu mật khẩu thành công! Đang chuyển hướng...</div>`;
+    currentSession = { ...currentSession, user: data.user || currentSession.user };
+    await syncCurrentUserProfile({ password_set: true });
+    renderAuthHeader();
+    showToast('Đã đặt mật khẩu thành công.');
+
+    let pending = consumePendingNextRoute() || 'dashboard';
+    if (pending === 'set-password' || pending === 'login') pending = 'dashboard';
+    
+    // Tránh trường hợp kẹt ở hash hiện tại không kích hoạt route()
+    if (location.hash === `#${pending}`) {
+      route();
+    } else {
+      location.hash = routes[pending] ? `#${pending}` : '#dashboard';
+    }
+  } catch (err) {
+    console.error("Set password error:", err);
+    result.innerHTML = `<div class="state-box error">Lỗi hệ thống: ${escapeHTML(err.message || String(err))}</div>`;
   }
-
-  currentSession = { ...currentSession, user: data.user || currentSession.user };
-  await syncCurrentUserProfile({ password_set: true });
-  renderAuthHeader();
-  showToast('Đã đặt mật khẩu thành công.');
-
-  const pending = consumePendingNextRoute() || 'dashboard';
-  location.hash = routes[pending] ? `#${pending}` : '#dashboard';
 }
 
 async function syncCurrentUserProfile(extra = {}) {

@@ -85,7 +85,15 @@ def _safe_dt(value: str) -> str:
 
 def _matches_btc(item: dict[str, Any]) -> bool:
     haystack = f"{item.get('title', '')} {item.get('summary', '')}".lower()
-    keywords = ["bitcoin", "btc", "crypto", "cryptocurrency", "binance", "etf", "blockchain"]
+    keywords = [
+        "bitcoin",
+        "btc",
+        "crypto",
+        "cryptocurrency",
+        "binance",
+        "etf",
+        "blockchain",
+    ]
     return any(keyword in haystack for keyword in keywords)
 
 
@@ -106,7 +114,18 @@ def _parse_rss(xml_text: str, source_hint: str) -> list[dict[str, Any]]:
             "source": channel_title or source_hint,
             "published_at": _safe_dt(pub),
             "summary": summary[:320],
-            "tags": [tag for tag in ["BTC" if "bitcoin" in title.lower() or "btc" in title.lower() else None, "news"] if tag],
+            "tags": [
+                tag
+                for tag in [
+                    (
+                        "BTC"
+                        if "bitcoin" in title.lower() or "btc" in title.lower()
+                        else None
+                    ),
+                    "news",
+                ]
+                if tag
+            ],
         }
         if _matches_btc(row):
             items.append(row)
@@ -121,7 +140,9 @@ async def _fetch_source(client: httpx.AsyncClient, url: str) -> list[dict[str, A
 
 async def _fetch_news() -> tuple[list[dict[str, Any]], list[str]]:
     urls = _rss_urls()
-    async with httpx.AsyncClient(headers={"User-Agent": "BTC-BigData-AI-Advisor/1.0"}) as client:
+    async with httpx.AsyncClient(
+        headers={"User-Agent": "BTC-BigData-AI-Advisor/1.0"}
+    ) as client:
         tasks = [_fetch_source(client, url) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     items: list[dict[str, Any]] = []

@@ -2,7 +2,13 @@ from fastapi import APIRouter, Query, Request
 
 from app.data_loader import load_mock_data
 from app.auth import get_optional_user
-from app.repositories.market_repository import get_ai_history, get_ai_history_for_user, get_latest_ohlcv, get_p2p_spread, insert_ai_history_safe
+from app.repositories.market_repository import (
+    get_ai_history,
+    get_ai_history_for_user,
+    get_latest_ohlcv,
+    get_p2p_spread,
+    insert_ai_history_safe,
+)
 from app.schemas import AskAIRequest, AskAIResponse
 from app.services.ai_service import (
     DISCLAIMER,
@@ -14,7 +20,11 @@ from app.services.ai_service import (
     now_iso,
     suggested_action,
 )
-from app.services.indicator_service import calculate_risk_score, score_market, signal_from_latest
+from app.services.indicator_service import (
+    calculate_risk_score,
+    score_market,
+    signal_from_latest,
+)
 from app.services.public_api_service import fetch_public_api
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
@@ -34,26 +44,41 @@ async def _market_context():
 
     p2p_rows = get_p2p_spread(168)
     if p2p_rows:
-        p2p = {"count": len(p2p_rows), "hours": 168, "latest": p2p_rows[0], "data": p2p_rows[:20]}
+        p2p = {
+            "count": len(p2p_rows),
+            "hours": 168,
+            "latest": p2p_rows[0],
+            "data": p2p_rows[:20],
+        }
     else:
         p2p_public = await fetch_public_api("/api/p2p-spread?hours=168")
         if p2p_public:
             p2p = p2p_public
         else:
             mock = load_mock_data()["p2p"]
-            p2p = {"count": mock.get("count", len(mock["data"])), "hours": 168, "latest": mock["data"][0], "data": mock["data"][:20]}
+            p2p = {
+                "count": mock.get("count", len(mock["data"])),
+                "hours": 168,
+                "latest": mock["data"][0],
+                "data": mock["data"][:20],
+            }
 
     return latest, summary, p2p
 
 
+from app.limiter import limiter
+
 @router.post("/ask", response_model=AskAIResponse)
+@limiter.limit("5/minute")
 async def ask_ai(payload: AskAIRequest, request: Request):
     latest, summary, p2p = await _market_context()
     rule = score_market(latest, summary)
     risk = calculate_risk_score(latest)
 
     system_prompt = build_system_prompt()
-    prompt = build_market_prompt(payload.question, latest, summary, p2p, rule, payload.risk_profile)
+    prompt = build_market_prompt(
+        payload.question, latest, summary, p2p, rule, payload.risk_profile
+    )
     try:
         answer = await call_ai_provider(prompt, system_prompt)
     except Exception as exc:
@@ -88,7 +113,12 @@ async def ask_ai(payload: AskAIRequest, request: Request):
             "confidence": rule["confidence"],
             "reasons": reasons,
             "risks": risks,
-            "market_snapshot": {"latest": latest, "summary": summary, "p2p_latest": p2p.get("latest"), "risk": risk},
+            "market_snapshot": {
+                "latest": latest,
+                "summary": summary,
+                "p2p_latest": p2p.get("latest"),
+                "risk": risk,
+            },
             "model_name": "backend-ai-advisor",
             "user_id": user["id"] if user else None,
             "created_at": created_at,

@@ -67,7 +67,12 @@ async def call_ai_provider(prompt: str, system_prompt: str) -> str | None:
     model = settings.ai_model
 
     if provider == "gemini" and settings.gemini_api_key:
-        return await _call_gemini(prompt, system_prompt, settings.gemini_api_key, model or "gemini-2.5-flash-lite")
+        return await _call_gemini(
+            prompt,
+            system_prompt,
+            settings.gemini_api_key,
+            model or "gemini-2.5-flash-lite",
+        )
     if provider == "groq" and settings.groq_api_key:
         return await _call_openai_compatible(
             prompt,
@@ -87,7 +92,9 @@ async def call_ai_provider(prompt: str, system_prompt: str) -> str | None:
     return None
 
 
-async def _call_gemini(prompt: str, system_prompt: str, api_key: str, model: str) -> str:
+async def _call_gemini(
+    prompt: str, system_prompt: str, api_key: str, model: str
+) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     body = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -101,7 +108,9 @@ async def _call_gemini(prompt: str, system_prompt: str, api_key: str, model: str
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
-async def _call_openai_compatible(prompt: str, system_prompt: str, api_key: str, base_url: str, model: str) -> str:
+async def _call_openai_compatible(
+    prompt: str, system_prompt: str, api_key: str, base_url: str, model: str
+) -> str:
     body = {
         "model": model,
         "temperature": 0.25,
@@ -118,13 +127,22 @@ async def _call_openai_compatible(prompt: str, system_prompt: str, api_key: str,
     return data["choices"][0]["message"]["content"]
 
 
-def fallback_answer(question: str, rule_result: dict[str, Any], latest: dict[str, Any], p2p: dict[str, Any]) -> str:
+def fallback_answer(
+    question: str,
+    rule_result: dict[str, Any],
+    latest: dict[str, Any],
+    p2p: dict[str, Any],
+) -> str:
     verdict = rule_result.get("verdict", "NEUTRAL")
     price = latest.get("close")
-    reasons = rule_result.get("reasons") or ["Tín hiệu hiện tại chưa đủ mạnh để kết luận một chiều."]
+    reasons = rule_result.get("reasons") or [
+        "Tín hiệu hiện tại chưa đủ mạnh để kết luận một chiều."
+    ]
     action = suggested_action(verdict)
     reason_text = "\n".join(f"- {item}" for item in reasons[:5])
-    price_text = f" quanh ${price:,.2f}" if isinstance(price, (int, float)) else " hiện tại"
+    price_text = (
+        f" quanh ${price:,.2f}" if isinstance(price, (int, float)) else " hiện tại"
+    )
     return (
         f"Kết luận tham khảo: {verdict}.\n\n"
         f"BTC đang giao dịch{price_text}. Các lý do chính:\n{reason_text}\n\n"

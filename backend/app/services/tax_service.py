@@ -4,10 +4,14 @@ from typing import Any
 
 from fastapi import HTTPException
 
-DISCLAIMER = "Chỉ mang tính ước tính tham khảo, không thay thế tư vấn thuế chuyên nghiệp."
+DISCLAIMER = (
+    "Chỉ mang tính ước tính tham khảo, không thay thế tư vấn thuế chuyên nghiệp."
+)
 
 
-def calc_tax(amount: float, country: str = "VN", holding_days: int = 0) -> dict[str, Any]:
+def calc_tax(
+    amount: float, country: str = "VN", holding_days: int = 0
+) -> dict[str, Any]:
     if amount <= 0:
         raise HTTPException(status_code=400, detail="amount phải lớn hơn 0")
 

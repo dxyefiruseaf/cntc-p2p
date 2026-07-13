@@ -8,7 +8,11 @@ from app.config import get_settings
 async def send_alert_email(to_email: str, subject: str, html_body: str) -> dict:
     settings = get_settings()
     if not settings.resend_api_key:
-        return {"ok": False, "status": "skipped", "message": "RESEND_API_KEY chưa cấu hình"}
+        return {
+            "ok": False,
+            "status": "skipped",
+            "message": "RESEND_API_KEY chưa cấu hình",
+        }
 
     async with httpx.AsyncClient(timeout=30) as client:
         res = await client.post(

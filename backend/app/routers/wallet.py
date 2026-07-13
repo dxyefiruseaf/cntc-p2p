@@ -40,7 +40,9 @@ def _vnp_hash(params: dict[str, Any], secret: str) -> str:
         if v is not None and k not in {"vnp_SecureHash", "vnp_SecureHashType"}
     }
     query = urllib.parse.urlencode(sorted(filtered.items()))
-    return hmac.new(secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha512).hexdigest()
+    return hmac.new(
+        secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha512
+    ).hexdigest()
 
 
 def _verify_vnp(params: dict[str, Any]) -> bool:
@@ -64,7 +66,9 @@ def _wallet_return_url(request: Request) -> str:
     if settings.vnpay_wallet_return_url:
         return settings.vnpay_wallet_return_url
     if settings.vnpay_return_url:
-        return settings.vnpay_return_url.replace("/api/payment/return", "/api/wallet/topup/return")
+        return settings.vnpay_return_url.replace(
+            "/api/payment/return", "/api/wallet/topup/return"
+        )
     return str(request.url_for("wallet_topup_return"))
 
 
@@ -87,7 +91,10 @@ async def wallet_transactions(request: Request, limit: int = 50):
     return {"data": list_wallet_transactions(user["id"], limit=max(1, min(limit, 100)))}
 
 
+from app.limiter import limiter
+
 @router.post("/topup/create")
+@limiter.limit("10/minute")
 async def create_topup(payload: CreateWalletTopupRequest, request: Request):
     """Create a wallet top-up.
 
@@ -101,12 +108,14 @@ async def create_topup(payload: CreateWalletTopupRequest, request: Request):
     prefix = "DEMO" if settings.wallet_demo_payment_enabled else "WALLET"
     txn_ref = f"{prefix}-{user['id'][:8]}-{int(now.timestamp())}-{uuid4().hex[:6]}"
 
-    topup = create_wallet_topup({
-        "user_id": user["id"],
-        "amount_vnd": payload.amount_vnd,
-        "vnp_txn_ref": txn_ref,
-        "status": "pending",
-    })
+    topup = create_wallet_topup(
+        {
+            "user_id": user["id"],
+            "amount_vnd": payload.amount_vnd,
+            "vnp_txn_ref": txn_ref,
+            "status": "pending",
+        }
+    )
     if not topup:
         raise HTTPException(status_code=503, detail="Không tạo được giao dịch nạp ví")
 
@@ -118,13 +127,16 @@ async def create_topup(payload: CreateWalletTopupRequest, request: Request):
             "BTC_BIGDATA_WALLET_DEMO_TOPUP|"
             f"txn_ref={txn_ref}|amount_vnd={payload.amount_vnd}|mode=coursework_no_real_money"
         )
-        create_wallet_topup({
-            "user_id": user["id"],
-            "amount_vnd": payload.amount_vnd,
-            "vnp_txn_ref": txn_ref,
-            "status": "pending",
-            "payment_url": demo_confirm_url,
-        }, upsert=True)
+        create_wallet_topup(
+            {
+                "user_id": user["id"],
+                "amount_vnd": payload.amount_vnd,
+                "vnp_txn_ref": txn_ref,
+                "status": "pending",
+                "payment_url": demo_confirm_url,
+            },
+            upsert=True,
+        )
         return {
             "payment_url": demo_confirm_url,
             "qr_payload": qr_payload,
@@ -138,7 +150,10 @@ async def create_topup(payload: CreateWalletTopupRequest, request: Request):
 
     # VNPay Sandbox mode: requires sandbox merchant keys.
     if not settings.vnpay_tmn_code or not settings.vnpay_hash_secret:
-        raise HTTPException(status_code=503, detail="VNPay Sandbox chưa được cấu hình. Bật WALLET_DEMO_PAYMENT_ENABLED=true để demo không mất phí.")
+        raise HTTPException(
+            status_code=503,
+            detail="VNPay Sandbox chưa được cấu hình. Bật WALLET_DEMO_PAYMENT_ENABLED=true để demo không mất phí.",
+        )
 
     return_url = _wallet_return_url(request)
     params = {
@@ -156,15 +171,20 @@ async def create_topup(payload: CreateWalletTopupRequest, request: Request):
         "vnp_CreateDate": now.strftime("%Y%m%d%H%M%S"),
     }
     params["vnp_SecureHash"] = _vnp_hash(params, settings.vnpay_hash_secret)
-    payment_url = f"{settings.vnpay_pay_url}?{urllib.parse.urlencode(sorted(params.items()))}"
+    payment_url = (
+        f"{settings.vnpay_pay_url}?{urllib.parse.urlencode(sorted(params.items()))}"
+    )
 
-    create_wallet_topup({
-        "user_id": user["id"],
-        "amount_vnd": payload.amount_vnd,
-        "vnp_txn_ref": txn_ref,
-        "status": "pending",
-        "payment_url": payment_url,
-    }, upsert=True)
+    create_wallet_topup(
+        {
+            "user_id": user["id"],
+            "amount_vnd": payload.amount_vnd,
+            "vnp_txn_ref": txn_ref,
+            "status": "pending",
+            "payment_url": payment_url,
+        },
+        upsert=True,
+    )
 
     return {
         "payment_url": payment_url,
@@ -191,9 +211,13 @@ async def demo_confirm_topup(payload: DemoConfirmTopupRequest, request: Request)
     user = get_current_user(request)
     topup = get_wallet_topup_by_txn_ref(payload.txn_ref)
     if not topup or topup.get("user_id") != user["id"]:
-        raise HTTPException(status_code=404, detail="Không tìm thấy giao dịch nạp ví demo")
+        raise HTTPException(
+            status_code=404, detail="Không tìm thấy giao dịch nạp ví demo"
+        )
     if topup.get("status") == "failed":
-        raise HTTPException(status_code=400, detail="Giao dịch đã thất bại, không thể xác nhận")
+        raise HTTPException(
+            status_code=400, detail="Giao dịch đã thất bại, không thể xác nhận"
+        )
 
     updated = mark_wallet_topup_success(payload.txn_ref)
     wallet = get_wallet_for_user(user["id"])
@@ -222,7 +246,11 @@ async def wallet_topup_return(request: Request):
     txn_ref = str(params.get("vnp_TxnRef", ""))
     response_code = str(params.get("vnp_ResponseCode", ""))
     transaction_status = str(params.get("vnp_TransactionStatus", ""))
-    paid = ok and response_code == "00" and (not transaction_status or transaction_status == "00")
+    paid = (
+        ok
+        and response_code == "00"
+        and (not transaction_status or transaction_status == "00")
+    )
 
     if txn_ref:
         topup = get_wallet_topup_by_txn_ref(txn_ref)

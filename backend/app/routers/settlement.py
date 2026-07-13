@@ -33,7 +33,9 @@ def _age_minutes(value: Any) -> float | None:
     return round((datetime.now(timezone.utc) - dt).total_seconds() / 60, 1)
 
 
-def _latest_by_type(rows: list[dict[str, Any]], trade_type: str) -> dict[str, Any] | None:
+def _latest_by_type(
+    rows: list[dict[str, Any]], trade_type: str
+) -> dict[str, Any] | None:
     return next((r for r in rows if r.get("trade_type") == trade_type), None)
 
 
@@ -55,13 +57,18 @@ async def net_settlement(
 ):
     rows = get_p2p_spread(1)
     if not rows:
-        raise HTTPException(status_code=404, detail="Chưa có dữ liệu P2P, hãy chạy pipeline đồng bộ dữ liệu và thử lại sau")
+        raise HTTPException(
+            status_code=404,
+            detail="Chưa có dữ liệu P2P, hãy chạy pipeline đồng bộ dữ liệu và thử lại sau",
+        )
 
     # Với side=sell: người dùng bán USDT lấy VNĐ nên dùng dòng SELL. Với side=buy: dùng dòng BUY.
     trade_type = "SELL" if side == "sell" else "BUY"
     p2p_row = _latest_by_type(rows, trade_type)
     if not p2p_row:
-        raise HTTPException(status_code=404, detail=f"Chưa có dữ liệu P2P chiều {trade_type}")
+        raise HTTPException(
+            status_code=404, detail=f"Chưa có dữ liệu P2P chiều {trade_type}"
+        )
 
     p2p_price = float(p2p_row["p2p_price"])
     market_price = float(p2p_row["market_price"])
@@ -70,7 +77,9 @@ async def net_settlement(
     alt_price = market_price if price_source == "p2p" else p2p_price
 
     gross_vnd, amount_usdt = _gross_from_amount(amount, unit, applied_price)
-    alt_gross_vnd, _ = _gross_from_amount(amount_usdt if unit == "usdt" else amount, unit, alt_price)
+    alt_gross_vnd, _ = _gross_from_amount(
+        amount_usdt if unit == "usdt" else amount, unit, alt_price
+    )
 
     # VN tax is on sale value. For buy side we still calculate a transparent estimated cost with tax=0 for VN.
     taxable_vnd = gross_vnd if side == "sell" else 0
@@ -80,12 +89,23 @@ async def net_settlement(
         taxable_vnd = gross_vnd
         alt_taxable_vnd = alt_gross_vnd
 
-    tax = calc_tax(max(taxable_vnd, 0.000001), country, holding_days) if taxable_vnd > 0 else {
-        "country": country.upper(), "tax_rate_pct": 0, "tax_amount": 0, "net_amount": gross_vnd,
-        "note": "Chiều mua không phát sinh thuế bán trong mô phỏng này.",
-        "disclaimer": "Chỉ mang tính ước tính tham khảo, không thay thế tư vấn thuế chuyên nghiệp.",
-    }
-    alt_tax = calc_tax(max(alt_taxable_vnd, 0.000001), country, holding_days) if alt_taxable_vnd > 0 else {"tax_amount": 0}
+    tax = (
+        calc_tax(max(taxable_vnd, 0.000001), country, holding_days)
+        if taxable_vnd > 0
+        else {
+            "country": country.upper(),
+            "tax_rate_pct": 0,
+            "tax_amount": 0,
+            "net_amount": gross_vnd,
+            "note": "Chiều mua không phát sinh thuế bán trong mô phỏng này.",
+            "disclaimer": "Chỉ mang tính ước tính tham khảo, không thay thế tư vấn thuế chuyên nghiệp.",
+        }
+    )
+    alt_tax = (
+        calc_tax(max(alt_taxable_vnd, 0.000001), country, holding_days)
+        if alt_taxable_vnd > 0
+        else {"tax_amount": 0}
+    )
 
     net_vnd = gross_vnd - float(tax.get("tax_amount", 0))
     alt_net_vnd = alt_gross_vnd - float(alt_tax.get("tax_amount", 0))
@@ -116,7 +136,11 @@ async def net_settlement(
             "alt_price_source": alt_source,
             "alt_applied_price": alt_price,
             "difference_vnd": difference,
-            "verdict": "alt_better" if difference > 0 else ("selected_better" if difference < 0 else "equal"),
+            "verdict": (
+                "alt_better"
+                if difference > 0
+                else ("selected_better" if difference < 0 else "equal")
+            ),
         },
         "warnings": warnings,
         "source": {

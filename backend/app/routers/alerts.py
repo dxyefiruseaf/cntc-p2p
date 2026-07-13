@@ -23,7 +23,9 @@ class AlertCreate(BaseModel):
 
 
 class AlertUpdate(BaseModel):
-    metric: str | None = Field(None, pattern="^(price|rsi|p2p_spread_sell|p2p_spread_buy)$")
+    metric: str | None = Field(
+        None, pattern="^(price|rsi|p2p_spread_sell|p2p_spread_buy)$"
+    )
     operator: str | None = Field(None, pattern="^(gt|lt)$")
     threshold: float | None = None
     active: bool | None = None
@@ -40,7 +42,9 @@ async def get_alerts(request: Request):
 async def post_alert(payload: AlertCreate, request: Request):
     user = get_current_user(request)
     if payload.active and count_active_alerts(user["id"]) >= 5:
-        raise HTTPException(status_code=400, detail="Mỗi tài khoản chỉ được bật tối đa 5 cảnh báo")
+        raise HTTPException(
+            status_code=400, detail="Mỗi tài khoản chỉ được bật tối đa 5 cảnh báo"
+        )
     row = payload.model_dump()
     row["user_id"] = user["id"]
     created = create_alert_rule(row)

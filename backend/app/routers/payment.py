@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field
 
 from app.auth import get_current_user
 from app.config import get_settings
-from app.repositories.market_repository import create_order, get_order_by_txn_ref, update_order_status, upsert_subscription
+from app.repositories.market_repository import (
+    create_order,
+    get_order_by_txn_ref,
+    update_order_status,
+    upsert_subscription,
+)
 
 router = APIRouter(prefix="/api/payment", tags=["payment"])
 
@@ -28,9 +33,15 @@ class CreatePaymentRequest(BaseModel):
 
 
 def _vnp_hash(params: dict[str, Any], secret: str) -> str:
-    filtered = {k: str(v) for k, v in params.items() if v is not None and k not in {"vnp_SecureHash", "vnp_SecureHashType"}}
+    filtered = {
+        k: str(v)
+        for k, v in params.items()
+        if v is not None and k not in {"vnp_SecureHash", "vnp_SecureHashType"}
+    }
     query = urllib.parse.urlencode(sorted(filtered.items()))
-    return hmac.new(secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha512).hexdigest()
+    return hmac.new(
+        secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha512
+    ).hexdigest()
 
 
 def _verify_vnp(params: dict[str, Any]) -> bool:
@@ -61,13 +72,15 @@ async def create_payment(payload: CreatePaymentRequest, request: Request):
 
     now = datetime.now(timezone.utc)
     txn_ref = f"{user['id'][:8]}-{int(now.timestamp())}-{uuid4().hex[:6]}"
-    order = create_order({
-        "user_id": user["id"],
-        "plan_id": payload.plan_id,
-        "amount_vnd": plan["amount_vnd"],
-        "vnp_txn_ref": txn_ref,
-        "status": "pending",
-    })
+    order = create_order(
+        {
+            "user_id": user["id"],
+            "plan_id": payload.plan_id,
+            "amount_vnd": plan["amount_vnd"],
+            "vnp_txn_ref": txn_ref,
+            "status": "pending",
+        }
+    )
     if not order:
         raise HTTPException(status_code=503, detail="Không tạo được đơn hàng")
 
@@ -86,7 +99,9 @@ async def create_payment(payload: CreatePaymentRequest, request: Request):
         "vnp_CreateDate": now.strftime("%Y%m%d%H%M%S"),
     }
     params["vnp_SecureHash"] = _vnp_hash(params, settings.vnpay_hash_secret)
-    payment_url = f"{settings.vnpay_pay_url}?{urllib.parse.urlencode(sorted(params.items()))}"
+    payment_url = (
+        f"{settings.vnpay_pay_url}?{urllib.parse.urlencode(sorted(params.items()))}"
+    )
     return {"payment_url": payment_url, "txn_ref": txn_ref, "sandbox": True}
 
 
@@ -122,12 +137,16 @@ async def payment_ipn(request: Request):
         paid_at = datetime.now(timezone.utc).isoformat()
         update_order_status(str(txn_ref), "success", paid_at)
         plan = PLANS.get(order["plan_id"], PLANS["premium_monthly"])
-        upsert_subscription({
-            "user_id": order["user_id"],
-            "plan_id": order["plan_id"],
-            "active": True,
-            "expires_at": (datetime.now(timezone.utc) + timedelta(days=plan["days"])).isoformat(),
-        })
+        upsert_subscription(
+            {
+                "user_id": order["user_id"],
+                "plan_id": order["plan_id"],
+                "active": True,
+                "expires_at": (
+                    datetime.now(timezone.utc) + timedelta(days=plan["days"])
+                ).isoformat(),
+            }
+        )
         return {"RspCode": "00", "Message": "Confirm Success"}
 
     update_order_status(str(txn_ref), "failed")

@@ -1,4 +1,6 @@
 from typing import Any
+import time
+from functools import wraps
 
 from app.supabase_client import get_supabase
 
@@ -12,23 +14,45 @@ OHLCV_FIELDS = (
     "bb_upper,bb_mid,bb_lower,bb_width,ema_20,ema_50,ema_200,atr_14,stoch_k,stoch_d,vol_ma_20"
 )
 
-P2P_FIELDS = (
-    "timestamp,asset,fiat,trade_type,p2p_price,p2p_price_min,p2p_price_max,samples,market_price,spread_pct"
-)
+P2P_FIELDS = "timestamp,asset,fiat,trade_type,p2p_price,p2p_price_min,p2p_price_max,samples,market_price,spread_pct"
+
+
+def ttl_cache(ttl_seconds: int):
+    def decorator(func):
+        _cache = {}
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            key = str(args) + str(kwargs)
+            now = time.time()
+            if key in _cache and now - _cache[key]['time'] < ttl_seconds:
+                return _cache[key]['value']
+            value = func(*args, **kwargs)
+            _cache[key] = {'time': now, 'value': value}
+            return value
+        return wrapper
+    return decorator
 
 
 def _client():
     return get_supabase()
 
 
+@ttl_cache(ttl_seconds=60)
 def get_latest_ohlcv() -> dict[str, Any] | None:
     sb = _client()
     if sb is None:
         return None
-    res = sb.table(OHLCV_TABLE).select(OHLCV_FIELDS).order("timestamp", desc=True).limit(1).execute()
+    res = (
+        sb.table(OHLCV_TABLE)
+        .select(OHLCV_FIELDS)
+        .order("timestamp", desc=True)
+        .limit(1)
+        .execute()
+    )
     return res.data[0] if res.data else None
 
 
+@ttl_cache(ttl_seconds=60)
 def get_ohlcv(hours: int) -> list[dict[str, Any]]:
     sb = _client()
     if sb is None:
@@ -43,6 +67,7 @@ def get_ohlcv(hours: int) -> list[dict[str, Any]]:
     return list(reversed(res.data or []))
 
 
+@ttl_cache(ttl_seconds=60)
 def get_p2p_spread(hours: int) -> list[dict[str, Any]]:
     sb = _client()
     if sb is None:
@@ -71,7 +96,9 @@ def get_ai_history(limit: int = 24) -> list[dict[str, Any]]:
         return []
     res = (
         sb.table(AI_TABLE)
-        .select("id,created_at,question,answer,verdict,confidence,reasons,risks,model_name")
+        .select(
+            "id,created_at,question,answer,verdict,confidence,reasons,risks,model_name"
+        )
         .order("created_at", desc=True)
         .limit(limit)
         .execute()
@@ -93,6 +120,7 @@ def upsert_p2p(rows: list[dict[str, Any]]) -> int:
         return 0
     sb.table(P2P_TABLE).upsert(rows, on_conflict="timestamp,trade_type").execute()
     return len(rows)
+
 
 # ---------------------------------------------------------------------------
 # User-owned feature repositories
@@ -125,7 +153,9 @@ def get_ai_history_for_user(user_id: str, limit: int = 24) -> list[dict[str, Any
     try:
         res = (
             sb.table(AI_TABLE)
-            .select("id,created_at,question,answer,verdict,confidence,reasons,risks,model_name,user_id")
+            .select(
+                "id,created_at,question,answer,verdict,confidence,reasons,risks,model_name,user_id"
+            )
             .eq("user_id", user_id)
             .order("created_at", desc=True)
             .limit(limit)
@@ -150,7 +180,9 @@ def list_demo_trades(user_id: str, limit: int = 50) -> list[dict[str, Any]]:
         return []
     res = (
         sb.table(DEMO_TRADES_TABLE)
-        .select("id,user_id,side,amount_vnd,amount_usdt,price_source,applied_price,created_at")
+        .select(
+            "id,user_id,side,amount_vnd,amount_usdt,price_source,applied_price,created_at"
+        )
         .eq("user_id", user_id)
         .order("created_at", desc=True)
         .limit(limit)
@@ -165,7 +197,9 @@ def list_alert_rules(user_id: str) -> list[dict[str, Any]]:
         return []
     res = (
         sb.table(ALERT_RULES_TABLE)
-        .select("id,user_id,metric,operator,threshold,active,last_triggered_at,created_at")
+        .select(
+            "id,user_id,metric,operator,threshold,active,last_triggered_at,created_at"
+        )
         .eq("user_id", user_id)
         .order("created_at", desc=True)
         .execute()
@@ -181,7 +215,9 @@ def create_alert_rule(row: dict[str, Any]) -> dict[str, Any] | None:
     return res.data[0] if res.data else None
 
 
-def update_alert_rule(rule_id: str, user_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+def update_alert_rule(
+    rule_id: str, user_id: str, updates: dict[str, Any]
+) -> dict[str, Any] | None:
     sb = _client()
     if sb is None:
         return None
@@ -199,7 +235,13 @@ def delete_alert_rule(rule_id: str, user_id: str) -> bool:
     sb = _client()
     if sb is None:
         return False
-    res = sb.table(ALERT_RULES_TABLE).delete().eq("id", rule_id).eq("user_id", user_id).execute()
+    res = (
+        sb.table(ALERT_RULES_TABLE)
+        .delete()
+        .eq("id", rule_id)
+        .eq("user_id", user_id)
+        .execute()
+    )
     return bool(res.data)
 
 
@@ -219,11 +261,15 @@ def get_order_by_txn_ref(txn_ref: str) -> dict[str, Any] | None:
     sb = _client()
     if sb is None:
         return None
-    res = sb.table(ORDERS_TABLE).select("*").eq("vnp_txn_ref", txn_ref).limit(1).execute()
+    res = (
+        sb.table(ORDERS_TABLE).select("*").eq("vnp_txn_ref", txn_ref).limit(1).execute()
+    )
     return res.data[0] if res.data else None
 
 
-def update_order_status(txn_ref: str, status: str, paid_at: str | None = None) -> dict[str, Any] | None:
+def update_order_status(
+    txn_ref: str, status: str, paid_at: str | None = None
+) -> dict[str, Any] | None:
     sb = _client()
     if sb is None:
         return None
@@ -239,6 +285,7 @@ def upsert_subscription(row: dict[str, Any]) -> None:
     if sb is None:
         return
     sb.table(SUBSCRIPTIONS_TABLE).upsert(row, on_conflict="user_id,plan_id").execute()
+
 
 # ---------------------------------------------------------------------------
 # Wallet demo repositories: QR top-up + e-wallet balance for course sandbox
@@ -265,16 +312,30 @@ def get_wallet_for_user(user_id: str) -> dict[str, Any]:
     res = sb.table(WALLETS_TABLE).select("*").eq("user_id", user_id).limit(1).execute()
     if res.data:
         return res.data[0]
-    created = sb.table(WALLETS_TABLE).insert({"user_id": user_id, "balance_vnd": 0, "balance_usdt_demo": 0}).execute()
-    return created.data[0] if created.data else {"user_id": user_id, "balance_vnd": 0, "balance_usdt_demo": 0}
+    created = (
+        sb.table(WALLETS_TABLE)
+        .insert({"user_id": user_id, "balance_vnd": 0, "balance_usdt_demo": 0})
+        .execute()
+    )
+    return (
+        created.data[0]
+        if created.data
+        else {"user_id": user_id, "balance_vnd": 0, "balance_usdt_demo": 0}
+    )
 
 
-def create_wallet_topup(row: dict[str, Any], upsert: bool = False) -> dict[str, Any] | None:
+def create_wallet_topup(
+    row: dict[str, Any], upsert: bool = False
+) -> dict[str, Any] | None:
     sb = _client()
     if sb is None:
         return None
     if upsert:
-        res = sb.table(WALLET_TOPUPS_TABLE).upsert(row, on_conflict="vnp_txn_ref").execute()
+        res = (
+            sb.table(WALLET_TOPUPS_TABLE)
+            .upsert(row, on_conflict="vnp_txn_ref")
+            .execute()
+        )
     else:
         res = sb.table(WALLET_TOPUPS_TABLE).insert(row).execute()
     return res.data[0] if res.data else None
@@ -284,7 +345,13 @@ def get_wallet_topup_by_txn_ref(txn_ref: str) -> dict[str, Any] | None:
     sb = _client()
     if sb is None:
         return None
-    res = sb.table(WALLET_TOPUPS_TABLE).select("*").eq("vnp_txn_ref", txn_ref).limit(1).execute()
+    res = (
+        sb.table(WALLET_TOPUPS_TABLE)
+        .select("*")
+        .eq("vnp_txn_ref", txn_ref)
+        .limit(1)
+        .execute()
+    )
     return res.data[0] if res.data else None
 
 
@@ -294,7 +361,9 @@ def list_wallet_transactions(user_id: str, limit: int = 50) -> list[dict[str, An
         return []
     res = (
         sb.table(WALLET_TRANSACTIONS_TABLE)
-        .select("id,user_id,type,amount_vnd,balance_after_vnd,description,ref_id,created_at")
+        .select(
+            "id,user_id,type,amount_vnd,balance_after_vnd,description,ref_id,created_at"
+        )
         .eq("user_id", user_id)
         .order("created_at", desc=True)
         .limit(limit)
@@ -327,17 +396,30 @@ def mark_wallet_topup_success(txn_ref: str) -> dict[str, Any] | None:
     wallet = get_wallet_for_user(user_id)
     new_balance = _num(wallet.get("balance_vnd")) + amount
 
-    paid_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
-    sb.table(WALLETS_TABLE).update({"balance_vnd": new_balance, "updated_at": paid_at}).eq("user_id", user_id).execute()
-    updated = sb.table(WALLET_TOPUPS_TABLE).update({"status": "success", "paid_at": paid_at}).eq("vnp_txn_ref", txn_ref).execute()
-    _insert_wallet_transaction({
-        "user_id": user_id,
-        "type": "topup",
-        "amount_vnd": amount,
-        "balance_after_vnd": new_balance,
-        "description": "Nạp ví demo qua VNPay Sandbox QR",
-        "ref_id": txn_ref,
-    })
+    paid_at = (
+        __import__("datetime")
+        .datetime.now(__import__("datetime").timezone.utc)
+        .isoformat()
+    )
+    sb.table(WALLETS_TABLE).update(
+        {"balance_vnd": new_balance, "updated_at": paid_at}
+    ).eq("user_id", user_id).execute()
+    updated = (
+        sb.table(WALLET_TOPUPS_TABLE)
+        .update({"status": "success", "paid_at": paid_at})
+        .eq("vnp_txn_ref", txn_ref)
+        .execute()
+    )
+    _insert_wallet_transaction(
+        {
+            "user_id": user_id,
+            "type": "topup",
+            "amount_vnd": amount,
+            "balance_after_vnd": new_balance,
+            "description": "Nạp ví demo qua VNPay Sandbox QR",
+            "ref_id": txn_ref,
+        }
+    )
     return updated.data[0] if updated.data else topup
 
 
@@ -345,11 +427,18 @@ def mark_wallet_topup_failed(txn_ref: str) -> dict[str, Any] | None:
     sb = _client()
     if sb is None:
         return None
-    res = sb.table(WALLET_TOPUPS_TABLE).update({"status": "failed"}).eq("vnp_txn_ref", txn_ref).execute()
+    res = (
+        sb.table(WALLET_TOPUPS_TABLE)
+        .update({"status": "failed"})
+        .eq("vnp_txn_ref", txn_ref)
+        .execute()
+    )
     return res.data[0] if res.data else None
 
 
-def debit_wallet_for_payment(user_id: str, amount_vnd: int | float, description: str, ref_id: str | None = None) -> dict[str, Any]:
+def debit_wallet_for_payment(
+    user_id: str, amount_vnd: int | float, description: str, ref_id: str | None = None
+) -> dict[str, Any]:
     """Demo-only debit helper. Raises ValueError if balance is insufficient."""
     sb = _client()
     if sb is None:
@@ -360,14 +449,22 @@ def debit_wallet_for_payment(user_id: str, amount_vnd: int | float, description:
     if current < amount:
         raise ValueError("Số dư ví demo không đủ")
     new_balance = current - amount
-    updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
-    sb.table(WALLETS_TABLE).update({"balance_vnd": new_balance, "updated_at": updated_at}).eq("user_id", user_id).execute()
-    tx = _insert_wallet_transaction({
-        "user_id": user_id,
-        "type": "payment",
-        "amount_vnd": -amount,
-        "balance_after_vnd": new_balance,
-        "description": description,
-        "ref_id": ref_id,
-    })
+    updated_at = (
+        __import__("datetime")
+        .datetime.now(__import__("datetime").timezone.utc)
+        .isoformat()
+    )
+    sb.table(WALLETS_TABLE).update(
+        {"balance_vnd": new_balance, "updated_at": updated_at}
+    ).eq("user_id", user_id).execute()
+    tx = _insert_wallet_transaction(
+        {
+            "user_id": user_id,
+            "type": "payment",
+            "amount_vnd": -amount,
+            "balance_after_vnd": new_balance,
+            "description": description,
+            "ref_id": ref_id,
+        }
+    )
     return {"wallet": get_wallet_for_user(user_id), "transaction": tx}

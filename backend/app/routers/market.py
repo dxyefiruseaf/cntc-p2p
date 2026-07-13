@@ -3,7 +3,11 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query
 
 from app.data_loader import load_mock_data
-from app.repositories.market_repository import get_latest_ohlcv, get_ohlcv, get_p2p_spread
+from app.repositories.market_repository import (
+    get_latest_ohlcv,
+    get_ohlcv,
+    get_p2p_spread,
+)
 from app.services.indicator_service import (
     calculate_risk_score,
     generate_market_alerts,
@@ -103,7 +107,13 @@ async def latest():
 async def ohlcv(hours: int = Query(168, ge=1, le=8760)):
     rows = get_ohlcv(hours)
     if rows:
-        return {"symbol": "BTCUSDT", "timeframe": "1h", "hours": hours, "count": len(rows), "data": rows}
+        return {
+            "symbol": "BTCUSDT",
+            "timeframe": "1h",
+            "hours": hours,
+            "count": len(rows),
+            "data": rows,
+        }
 
     public = await fetch_public_api(f"/api/ohlcv?hours={hours}")
     if public:
@@ -111,7 +121,13 @@ async def ohlcv(hours: int = Query(168, ge=1, le=8760)):
 
     mock = load_mock_data()["ohlcv"]
     data = mock["data"][-hours:]
-    return {"symbol": "BTCUSDT", "timeframe": "1h", "hours": hours, "count": len(data), "data": data}
+    return {
+        "symbol": "BTCUSDT",
+        "timeframe": "1h",
+        "hours": hours,
+        "count": len(data),
+        "data": data,
+    }
 
 
 @router.get("/indicators/summary")
@@ -136,7 +152,8 @@ async def data_reliability():
         {
             "name": "OHLCV BTC/USDT",
             "source": latest_source,
-            "latest_timestamp": status.get("latest_ohlcv_timestamp") or latest.get("timestamp"),
+            "latest_timestamp": status.get("latest_ohlcv_timestamp")
+            or latest.get("timestamp"),
             "age_hours": status.get("ohlcv_age_hours"),
             "fresh": status.get("is_ohlcv_fresh"),
             "threshold_hours": 2,
@@ -161,7 +178,9 @@ async def data_reliability():
         message = "Một nguồn dữ liệu đang cũ hoặc chưa xác định, nên thận trọng khi diễn giải."
     else:
         level = "STALE"
-        message = "Nhiều nguồn dữ liệu chưa fresh, cần kiểm tra pipeline/GitHub Actions."
+        message = (
+            "Nhiều nguồn dữ liệu chưa fresh, cần kiểm tra pipeline/GitHub Actions."
+        )
 
     return {
         "level": level,
@@ -183,7 +202,12 @@ async def risk_score():
     latest, source = await _latest_with_fallback()
     status = _local_data_status()
     risk = calculate_risk_score(latest, status)
-    return {"timestamp": latest.get("timestamp"), "price": latest.get("close"), "source": source, **risk}
+    return {
+        "timestamp": latest.get("timestamp"),
+        "price": latest.get("close"),
+        "source": source,
+        **risk,
+    }
 
 
 @router.get("/market-alerts")
@@ -198,7 +222,11 @@ async def market_alerts():
         "count": len(alerts),
         "data": alerts,
         "risk": risk,
-        "sources": {"latest": latest_source, "summary": summary_source, "p2p": p2p_source},
+        "sources": {
+            "latest": latest_source,
+            "summary": summary_source,
+            "p2p": p2p_source,
+        },
         "disclaimer": "Cảnh báo rule-based phục vụ học tập và tham khảo, không phải lệnh giao dịch.",
     }
 
@@ -216,7 +244,12 @@ async def p2p_spread(hours: int = Query(168, ge=1, le=8760)):
     mock = load_mock_data()["p2p"]
     data = mock["data"][: hours * 2]
     if not data:
-        return {"count": 0, "data": [], "latest": None, "note": "Chưa có dữ liệu spread — pipeline có thể chưa chạy đủ 1 chu kỳ"}
+        return {
+            "count": 0,
+            "data": [],
+            "latest": None,
+            "note": "Chưa có dữ liệu spread — pipeline có thể chưa chạy đủ 1 chu kỳ",
+        }
     return {"count": len(data), "hours": hours, "latest": data[0], "data": data}
 
 
@@ -231,7 +264,11 @@ async def p2p_comparison():
             return None
         p2p_price = row.get("p2p_price")
         market_price = row.get("market_price")
-        if not isinstance(p2p_price, (int, float)) or not isinstance(market_price, (int, float)) or not market_price:
+        if (
+            not isinstance(p2p_price, (int, float))
+            or not isinstance(market_price, (int, float))
+            or not market_price
+        ):
             return {"row": row, "note": "Thiếu giá P2P hoặc giá thị trường để so sánh."}
         diff = p2p_price - market_price
         diff_pct = diff / market_price * 100
@@ -248,10 +285,12 @@ async def p2p_comparison():
             "timestamp": row.get("timestamp"),
             "explain": (
                 "P2P cao hơn giá tham chiếu nên người bán nhận nhiều VNĐ hơn."
-                if user_side == "sell" and favorable else
-                "P2P thấp hơn giá tham chiếu nên người mua trả ít VNĐ hơn."
-                if user_side == "buy" and favorable else
-                "Nguồn giá đang kém lợi hơn giá tham chiếu cho chiều giao dịch này."
+                if user_side == "sell" and favorable
+                else (
+                    "P2P thấp hơn giá tham chiếu nên người mua trả ít VNĐ hơn."
+                    if user_side == "buy" and favorable
+                    else "Nguồn giá đang kém lợi hơn giá tham chiếu cho chiều giao dịch này."
+                )
             ),
         }
 
