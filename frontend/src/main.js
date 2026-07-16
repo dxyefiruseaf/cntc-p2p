@@ -3,10 +3,35 @@ import { createClient } from '@supabase/supabase-js';
 import QRCode from 'qrcode';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/+$/, '');
+// Optional: tách data API sang một server riêng để giảm tải backend chính.
+// Nếu chưa cấu hình VITE_DATA_API_BASE_URL, toàn bộ request vẫn chạy qua API_BASE như cũ.
+const DATA_API_BASE = (import.meta.env.VITE_DATA_API_BASE_URL || API_BASE).replace(/\/+$/, '');
 const LIVE_NEWS_HIDDEN_KEY = 'btc_bigdata_live_news_hidden_v1';
 
+const DATA_ENDPOINT_PREFIXES = [
+  '/api/latest',
+  '/api/ohlcv',
+  '/api/indicators/summary',
+  '/api/p2p-spread',
+  '/api/p2p-comparison',
+  '/api/data-status',
+  '/api/data-reliability',
+  '/api/risk-score',
+  '/api/market-alerts',
+  '/api/news/latest',
+  '/api/tax-estimate',
+  '/api/net-settlement'
+];
+
+function shouldUseDataApi(endpoint) {
+  const clean = String(endpoint || '').replace(/^\/+/, '/');
+  return DATA_ENDPOINT_PREFIXES.some(prefix => clean.startsWith(prefix));
+}
+
 function apiUrl(endpoint) {
-  return `${API_BASE}/${String(endpoint || '').replace(/^\/+/, '')}`;
+  const clean = String(endpoint || '').replace(/^\/+/, '');
+  const base = shouldUseDataApi(`/${clean}`) ? DATA_API_BASE : API_BASE;
+  return `${base}/${clean}`;
 }
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -38,6 +63,10 @@ let chatMessages = [
 let orders = [];
 let currentSession = null;
 let authReady = !supabaseAuth;
+let topTickerBusy = false;
+let lastTopTickerAt = 0;
+let liveNewsTickerBusy = false;
+let passwordSavingInProgress = false;
 const protectedRoutes = new Set(['history', 'alerts', 'billing', 'wallet', 'set-password', 'account']);
 const trustRoutes = new Set(['dashboard', 'chart', 'p2p', 'tax', 'settlement', 'chat', 'risk', 'news', 'reliability']);
 
@@ -95,13 +124,21 @@ cleanupSupabaseAuthRedirectHash();
 initAuth();
 route();
 refreshTopTicker();
-setInterval(refreshTopTicker, 60_000);
+setInterval(() => {
+  if (getCurrentRouteName() !== 'set-password' && !passwordSavingInProgress) refreshTopTicker();
+}, 60_000);
+
+function getCurrentRouteName() {
+  const raw = (location.hash || '#theory').replace('#', '');
+  const name = raw.split('?')[0] || 'theory';
+  return routes[name] ? name : 'theory';
+}
 
 function route() {
   disposeCharts();
-  const raw = (location.hash || '#theory').replace('#', '');
-  const name = raw.split('?')[0] || 'business';
-  activeRoute = routes[name] ? name : 'theory';
+  activeRoute = getCurrentRouteName();
+  // Cho phép vào #set-password cả khi đã có mật khẩu để user có thể đổi mật khẩu.
+  // Luồng bắt buộc đặt mật khẩu lần đầu vẫn được xử lý trong redirectAfterLoginIfNeeded().
   if (protectedRoutes.has(activeRoute)) {
     if (!authReady) {
       app.innerHTML = loadingCard(160);
@@ -307,45 +344,82 @@ function mockFor(endpoint) {
   if (endpoint.startsWith('/api/news/latest')) return buildMockNews();
   if (endpoint.startsWith('/api/ai/history')) return window.MOCK_DATA.aiHistory || { count: 0, data: [] };
   if (endpoint.startsWith('/api/wallet/me')) return { wallet: { balance_vnd: 100000, balance_usdt_demo: 0 }, transactions: [], sandbox: true, disclaimer: 'Ví demo fallback khi backend chưa sẵn sàng.' };
+  if (endpoint.startsWith('/api/payment/subscription')) {
+    const raw = localStorage.getItem('btc_premium_subscription');
+    if (raw) {
+      try { return JSON.parse(raw); } catch (_) { }
+    }
+    return { active: false, plan_id: 'free', plan_name: 'Free', sandbox: true };
+  }
   return null;
 }
 
 async function fetchJson(endpoint, options = {}) {
-  const controller = new AbortController();
-  const timeoutMs = options.timeout ?? 30000;
-  const timeout = timeoutMs > 0
-    ? setTimeout(() => controller.abort(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs)
-    : null;
-  try {
-    const response = await fetch(apiUrl(endpoint), {
-      method: options.method || 'GET',
-      headers: { 'Content-Type': 'application/json', ...authHeader(), ...(options.headers || {}) },
-      body: options.body ? JSON.stringify(options.body) : undefined,
-      signal: controller.signal
-    });
-    if (timeout) clearTimeout(timeout);
-    if (!response.ok) {
-      let detail = `HTTP ${response.status}`;
-      try {
-        const err = await response.json();
-        detail = err.detail || detail;
-      } catch (_) { }
-      throw new Error(detail);
-    }
-    return { data: await response.json(), source: 'api' };
-  } catch (error) {
-    if (timeout) clearTimeout(timeout);
-    const fallback = mockFor(endpoint);
-    if (fallback) return { data: fallback, source: 'mock', error };
-    throw error;
+  const method = String(options.method || 'GET').toUpperCase();
+  const isGet = method === 'GET';
+  const url = apiUrl(endpoint);
+  const requestKey = isGet ? `${url}|${currentSession?.access_token ? 'auth' : 'anon'}` : '';
+
+  if (isGet) {
+    fetchJson._inFlight ||= new Map();
+    if (fetchJson._inFlight.has(requestKey)) return fetchJson._inFlight.get(requestKey);
   }
+
+  const requestPromise = (async () => {
+    const controller = new AbortController();
+    const timeoutMs = options.timeout ?? 30000;
+    const timeout = timeoutMs > 0
+      ? setTimeout(() => controller.abort(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs)
+      : null;
+    try {
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...authHeader(), ...(options.headers || {}) },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: controller.signal
+      });
+      if (timeout) clearTimeout(timeout);
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`;
+        try {
+          const err = await response.json();
+          detail = err.detail || detail;
+        } catch (_) { }
+        throw new Error(detail);
+      }
+      return { data: await response.json(), source: 'api' };
+    } catch (error) {
+      if (timeout) clearTimeout(timeout);
+      const fallback = mockFor(endpoint);
+      if (fallback) return { data: fallback, source: 'mock', error };
+      throw error;
+    } finally {
+      if (isGet) fetchJson._inFlight?.delete(requestKey);
+    }
+  })();
+
+  if (isGet) fetchJson._inFlight.set(requestKey, requestPromise);
+  return requestPromise;
 }
 
 async function refreshTopTicker() {
   if (!topTicker) return;
-  const res = await fetchJson('/api/latest', { timeout: 5500 });
-  topTicker.innerHTML = `BTC/USDT <strong>${formatUSD(res.data.close)}</strong>`;
-  topTicker.title = `${res.source === 'api' ? 'API backend' : 'Fallback demo'} · ${formatVNTime(res.data.timestamp)}`;
+  if (getCurrentRouteName() === 'set-password' || passwordSavingInProgress) return;
+
+  const now = Date.now();
+  if (topTickerBusy || now - lastTopTickerAt < 8000) return;
+
+  topTickerBusy = true;
+  lastTopTickerAt = now;
+  try {
+    const res = await fetchJson('/api/latest', { timeout: 5500 });
+    topTicker.innerHTML = `BTC/USDT <strong>${formatUSD(res.data.close)}</strong>`;
+    topTicker.title = `${res.source === 'api' ? 'API backend' : 'Fallback demo'} · ${formatVNTime(res.data.timestamp)}`;
+  } catch (error) {
+    console.warn('Không cập nhật được ticker BTC:', error.message);
+  } finally {
+    topTickerBusy = false;
+  }
 }
 
 function loadingCard(height = 160) {
@@ -384,8 +458,15 @@ function bmcItems() {
     },
     {
       id: 'rs', title: 'Revenue Streams', vi: 'Dòng doanh thu', className: 'bmc-rev',
-      bullets: ['Freemium: xem dashboard cơ bản miễn phí', 'Gói Pro: cảnh báo nâng cao', 'B2B API cho nhóm nghiên cứu/đào tạo', 'Affiliate/đối tác dữ liệu nếu thương mại hóa'],
-      detail: 'Giai đoạn MVP ưu tiên kiểm chứng nhu cầu. Khi có người dùng thật, có thể thu phí tính năng cảnh báo, lịch sử sâu, nhiều coin và API quota cao hơn.'
+      bullets: [
+        'Subscription/Free Trial: dùng thử 7 ngày, sau đó có thể nâng cấp gói trả phí dự kiến 49.000đ/tháng',
+        'Gói nâng cao gồm phân tích kỹ thuật, theo dõi chênh lệch P2P, cảnh báo, ước tính chi phí/thuế và AI Advisor',
+        'Quảng cáo và hợp tác với doanh nghiệp blockchain hoặc FinTech, có công bố minh bạch',
+        'Affiliate Marketing khi người dùng đăng ký tài khoản sàn giao dịch qua liên kết giới thiệu',
+        'API/Data Service trong tương lai cho doanh nghiệp, tổ chức nghiên cứu hoặc nhà phát triển',
+        'Các gói mở rộng như cảnh báo nâng cao, lịch sử dữ liệu sâu hơn hoặc xuất báo cáo phân tích'
+      ],
+      detail: 'Dòng doanh thu chính định hướng theo mô hình subscription có free trial. Các nguồn bổ sung như quảng cáo, affiliate và API dữ liệu chỉ nên triển khai minh bạch để không làm giảm tính khách quan của nền tảng phân tích.'
     },
     {
       id: 'kr', title: 'Key Resources', vi: 'Nguồn lực chính', className: 'bmc-kr',
@@ -1816,6 +1897,9 @@ function installLiveNewsTicker() {
 async function refreshLiveNewsTicker() {
   const inner = document.getElementById('liveNewsTrackInner');
   if (!inner) return;
+  if (getCurrentRouteName() === 'set-password' || passwordSavingInProgress || liveNewsTickerBusy) return;
+
+  liveNewsTickerBusy = true;
   try {
     const res = await fetchJson('/api/news/latest?limit=8', { timeout: 30000 });
     const items = (res.data.data || []).slice(0, 8);
@@ -1829,6 +1913,8 @@ async function refreshLiveNewsTicker() {
     const html = fallback.map(item => `<span><b>₿</b> ${escapeHTML(item.title)} <em>Demo</em></span>`).join('');
     inner.innerHTML = `<div class="live-news-segment">${html}</div><div class="live-news-segment" aria-hidden="true">${html}</div>`;
     inner.style.setProperty('--ticker-duration', `${Math.max(42, fallback.length * 10)}s`);
+  } finally {
+    liveNewsTickerBusy = false;
   }
 }
 
@@ -2294,6 +2380,9 @@ async function signInWithPasswordUI(next = 'dashboard') {
 
 function needsPasswordSetup() {
   if (!currentSession?.user) return false;
+  try {
+    if (localStorage.getItem(`btc_bigdata_password_set_${currentSession.user.id}`) === 'true') return false;
+  } catch (_) { }
   return currentSession.user.user_metadata?.password_set !== true;
 }
 
@@ -2314,18 +2403,19 @@ function renderSetPasswordPage() {
     return;
   }
 
+  const isChangingPassword = !needsPasswordSetup();
   app.innerHTML = `
     <section class="auth-shell single">
       <div class="auth-panel auth-form-card">
         <span class="badge green">Email đã xác thực</span>
-        <h1>Đặt mật khẩu bảo mật</h1>
+        <h1>${isChangingPassword ? 'Đổi mật khẩu bảo mật' : 'Đặt mật khẩu bảo mật'}</h1>
         <p class="muted">Email: <b>${escapeHTML(currentSession.user.email)}</b></p>
         <p class="muted">Mật khẩu giúp bạn đăng nhập nhanh ở các lần sau. Mật khẩu được Supabase Auth quản lý, project không tự lưu mật khẩu trong database.</p>
 
         <div class="field"><label>Mật khẩu mới</label><input id="newPassword" type="password" autocomplete="new-password" placeholder="Ít nhất 8 ký tự"></div>
         <div class="field"><label>Nhập lại mật khẩu</label><input id="confirmPassword" type="password" autocomplete="new-password" placeholder="Nhập lại mật khẩu"></div>
         <div class="password-hint">Yêu cầu: 8+ ký tự, chữ hoa, chữ thường, số và ký tự đặc biệt.</div>
-        <button id="setPasswordSubmit" class="btn primary full" style="margin-top:14px">Lưu mật khẩu</button>
+        <button id="setPasswordSubmit" class="btn primary full" style="margin-top:14px">${isChangingPassword ? 'Cập nhật mật khẩu' : 'Lưu mật khẩu'}</button>
         <div id="setPasswordResult"></div>
       </div>
     </section>
@@ -2338,6 +2428,7 @@ async function setPasswordUI() {
   const password = document.getElementById('newPassword')?.value || '';
   const confirm = document.getElementById('confirmPassword')?.value || '';
   const result = document.getElementById('setPasswordResult');
+  const submitBtn = document.getElementById('setPasswordSubmit');
 
   const errors = validatePassword(password);
   if (errors.length) {
@@ -2349,24 +2440,88 @@ async function setPasswordUI() {
     return;
   }
 
+  passwordSavingInProgress = true;
+  submitBtn?.setAttribute('disabled', 'disabled');
   result.innerHTML = `<div class="state-box empty">Đang lưu mật khẩu...</div>`;
-  const { data, error } = await supabaseAuth.auth.updateUser({
+
+  let resolved = false;
+
+  const goDashboardAfterPasswordSaved = () => {
+    if (resolved) return;
+    resolved = true;
+    passwordSavingInProgress = false;
+
+    try {
+      localStorage.removeItem('btc_bigdata_auth_next');
+      if (currentSession?.user?.id) localStorage.setItem(`btc_bigdata_password_set_${currentSession.user.id}`, 'true');
+    } catch (_) { }
+
+    if (currentSession?.user) {
+      currentSession = {
+        ...currentSession,
+        user: {
+          ...currentSession.user,
+          user_metadata: { ...(currentSession.user.user_metadata || {}), password_set: true }
+        }
+      };
+    }
+
+    result.innerHTML = `<div class="state-box success">Đã lưu mật khẩu thành công. Đang chuyển về Dashboard...</div>`;
+    showToast('Đã lưu mật khẩu thành công.');
+    renderAuthHeader();
+
+    // Sync profile chạy nền, không được chặn chuyển trang.
+    syncCurrentUserProfile({ password_set: true }).catch(error => {
+      console.warn('Không sync được profile sau khi đặt mật khẩu:', error.message);
+    });
+
+    window.setTimeout(() => {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#dashboard`);
+      route();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }, 350);
+  };
+
+  const showPasswordError = (message) => {
+    if (resolved) return;
+    resolved = true;
+    passwordSavingInProgress = false;
+    submitBtn?.removeAttribute('disabled');
+    result.innerHTML = `<div class="state-box error">${escapeHTML(message || 'Không lưu được mật khẩu.')}</div>`;
+  };
+
+  // Trường hợp Supabase Auth đã trả 200 nhưng SDK promise bị kẹt, vẫn thoát khỏi màn hình chờ.
+  const fallbackTimer = window.setTimeout(() => {
+    console.warn('Fallback redirect: Supabase updateUser chưa resolve sau 10 giây.');
+    goDashboardAfterPasswordSaved();
+  }, 10000);
+
+  supabaseAuth.auth.updateUser({
     password,
     data: { password_set: true }
+  }).then(({ data, error }) => {
+    window.clearTimeout(fallbackTimer);
+    if (error) {
+      showPasswordError(error.message);
+      return;
+    }
+
+    if (data?.user && currentSession) {
+      currentSession = {
+        ...currentSession,
+        user: {
+          ...currentSession.user,
+          ...data.user,
+          user_metadata: { ...(currentSession.user.user_metadata || {}), ...(data.user.user_metadata || {}), password_set: true }
+        }
+      };
+    }
+
+    goDashboardAfterPasswordSaved();
+  }).catch(error => {
+    window.clearTimeout(fallbackTimer);
+    showPasswordError(error.message);
   });
-
-  if (error) {
-    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}</div>`;
-    return;
-  }
-
-  currentSession = { ...currentSession, user: data.user || currentSession.user };
-  await syncCurrentUserProfile({ password_set: true });
-  renderAuthHeader();
-  showToast('Đã đặt mật khẩu thành công.');
-
-  const pending = consumePendingNextRoute() || 'dashboard';
-  location.hash = routes[pending] ? `#${pending}` : '#dashboard';
 }
 
 async function syncCurrentUserProfile(extra = {}) {
@@ -2685,30 +2840,118 @@ async function checkWalletTopupStatus(txnRef) {
   }
 }
 
-function renderBillingPage() {
+function formatDateTimeVN(value) {
+  if (!value) return 'Không giới hạn trong bản demo';
+  try {
+    return new Intl.DateTimeFormat('vi-VN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+  } catch (_) {
+    return String(value);
+  }
+}
+
+function premiumFeatureCards() {
+  return [
+    { badge: 'AI Advisor', title: 'Kịch bản AI nâng cao', text: 'Hỏi AI theo dữ liệu kỹ thuật, P2P, thuế/phí và trạng thái rủi ro thị trường.' },
+    { badge: 'Alerts', title: 'Cảnh báo nâng cao', text: 'Theo dõi tín hiệu giá, risk score và chênh lệch P2P để demo quy trình hỗ trợ quyết định.' },
+    { badge: 'Data', title: 'Lịch sử dữ liệu sâu hơn', text: 'Truy cập biểu đồ kỹ thuật, trạng thái dữ liệu và lịch sử phân tích phục vụ báo cáo.' },
+    { badge: 'Report', title: 'Xuất báo cáo phân tích', text: 'Mô phỏng gói mở rộng: tổng hợp nhận định, chi phí, P2P spread và kết quả trading demo.' }
+  ];
+}
+
+function persistPremiumSubscription(data) {
+  try { localStorage.setItem('btc_premium_subscription', JSON.stringify(data)); } catch (_) { }
+}
+
+async function getPremiumSubscription() {
+  const res = await fetchJson('/api/payment/subscription');
+  if (res?.data) persistPremiumSubscription(res.data);
+  return res.data;
+}
+
+async function renderBillingPage() {
   app.innerHTML = `
-    <section class="page-head"><div><span class="eyebrow">VNPay Sandbox</span><h1>Mua gói Premium thử nghiệm</h1><p class="lead">Đây là môi trường thử nghiệm Sandbox của VNPay — dùng để minh hoạ, không phát sinh tiền thật.</p></div></section>
+    <section class="page-head"><div><span class="eyebrow">Gói dịch vụ</span><h1>Premium Sandbox</h1><p class="lead">Quản lý gói demo cho BTC BigData Platform. Thanh toán sandbox và hủy gói đều không phát sinh tiền thật.</p></div></section>
+    <section id="billingContent">${loadingCard(180)}</section>`;
+  const box = document.getElementById('billingContent');
+  try {
+    const subscription = await getPremiumSubscription();
+    if (subscription?.active) renderPremiumActiveBilling(box, subscription);
+    else renderFreeBilling(box);
+  } catch (error) {
+    box.innerHTML = `<div class="state-box error">Không tải được trạng thái gói: ${escapeHTML(error.message)}</div><div style="margin-top:14px">${freeBillingMarkup()}</div>`;
+    bindFreeBillingActions();
+  }
+}
+
+function freeBillingMarkup() {
+  return `
     <section class="grid two">
-      <div class="card"><span class="badge neutral">Free</span><h2>Gói miễn phí</h2><p>Dashboard, P2P, thuế và chat AI cơ bản.</p></div>
-      <div class="card"><span class="badge violet">Premium Sandbox</span><h2>49.000đ/tháng</h2><p>Cảnh báo nâng cao, lịch sử sâu, nhiều kịch bản AI hơn.</p><button id="buyPremium" class="btn primary full" style="margin-top:14px">Nâng cấp qua VNPay Sandbox</button><a class="btn secondary full" href="#wallet" style="margin-top:10px">Nạp ví demo bằng QR Code</a></div>
+      <div class="card"><span class="badge neutral">Free</span><h2>Gói miễn phí</h2><p>Dashboard, giá BTC/USDT, P2P spread, công cụ thuế/thực nhận và AI cơ bản phục vụ học phần.</p><ul class="report-list"><li>Xem dữ liệu thị trường và biểu đồ kỹ thuật cơ bản.</li><li>Sử dụng ví QR demo và trading demo không phát sinh tiền thật.</li><li>Phù hợp người dùng mới trải nghiệm nền tảng.</li></ul></div>
+      <div class="card premium-plan-card"><span class="badge violet">Premium Sandbox</span><h2>49.000đ/tháng</h2><p>Dùng thử 7 ngày, sau đó có thể nâng cấp gói trả phí dự kiến. Bản hiện tại chỉ mô phỏng sandbox.</p><ul class="report-list"><li>Phân tích kỹ thuật nâng cao và theo dõi chênh lệch P2P.</li><li>Cảnh báo nâng cao, AI Advisor và ước tính chi phí/thuế.</li><li>Lịch sử dữ liệu sâu hơn và mô phỏng xuất báo cáo phân tích.</li></ul><button id="buyPremium" class="btn primary full" style="margin-top:14px">Nâng cấp qua VNPay Sandbox</button><a class="btn secondary full" href="#wallet" style="margin-top:10px">Nạp ví demo bằng QR Code</a></div>
     </section>`;
-  document.getElementById('buyPremium').addEventListener('click', async () => {
+}
+
+function renderFreeBilling(box) { box.innerHTML = freeBillingMarkup(); bindFreeBillingActions(); }
+
+function bindFreeBillingActions() {
+  document.getElementById('buyPremium')?.addEventListener('click', async () => {
     try {
-      const res = await fetchJson('/api/payment/create', { method: 'POST', body: { plan_id: 'premium_monthly' } });
+      const button = document.getElementById('buyPremium');
+      if (button) { button.disabled = true; button.textContent = 'Đang tạo thanh toán sandbox...'; }
+      const res = await fetchJson('/api/payment/create', { method: 'POST', body: { plan_id: 'premium_monthly' }, timeout: 30000 });
+      showToast('Đã tạo yêu cầu thanh toán Sandbox. Đang chuyển sang VNPay...');
       window.location.href = res.data.payment_url;
-    } catch (error) { showToast(error.message); }
+    } catch (error) {
+      showToast(error.message);
+      const button = document.getElementById('buyPremium');
+      if (button) { button.disabled = false; button.textContent = 'Nâng cấp qua VNPay Sandbox'; }
+    }
   });
+}
+
+function renderPremiumActiveBilling(box, subscription) {
+  const expiresAt = subscription.expires_at || subscription.subscription?.expires_at;
+  const planName = subscription.plan_name || subscription.plan?.name || 'Premium Sandbox';
+  box.innerHTML = `
+    <section class="premium-hero card"><div><span class="badge green">Premium đang hoạt động</span><h2>Bạn đã đăng ký ${escapeHTML(planName)}</h2><p>Gói Premium Sandbox đã được kích hoạt sau thanh toán demo. Đây là trạng thái mô phỏng phục vụ học phần, không phát sinh tiền thật.</p><div class="kpi-row" style="margin-top:16px"><div class="stat-card"><span class="stat-label">Trạng thái</span><strong class="stat-value">Active</strong><div class="stat-note">Premium Sandbox</div></div><div class="stat-card"><span class="stat-label">Hết hạn</span><strong class="stat-value" style="font-size:18px">${escapeHTML(formatDateTimeVN(expiresAt))}</strong><div class="stat-note">Có thể hủy bất kỳ lúc nào</div></div><div class="stat-card"><span class="stat-label">Thanh toán</span><strong class="stat-value">Demo</strong><div class="stat-note">VNPay Sandbox</div></div></div><div class="hero-actions" style="margin-top:18px"><a class="btn primary" href="#dashboard">Mở Dashboard Premium</a><a class="btn accent" href="#alerts">Tạo cảnh báo</a><a class="btn secondary" href="#chat">Hỏi AI Advisor</a><button id="cancelPremium" class="btn danger">Hủy Premium, quay về Free</button></div></div></section>
+    <section class="grid four" style="margin-top:18px">${premiumFeatureCards().map(item => `<article class="card premium-feature-card"><span class="badge violet">${escapeHTML(item.badge)}</span><h3>${escapeHTML(item.title)}</h3><p>${escapeHTML(item.text)}</p></article>`).join('')}</section>
+    <section class="card" style="margin-top:18px"><span class="badge amber">Minh bạch</span><h3>Ghi chú phạm vi demo</h3><p>Premium Sandbox chỉ dùng để minh họa mô hình Subscription/Free Trial trong báo cáo. Các tính năng AI, cảnh báo, ước tính thuế và trading demo chỉ hỗ trợ tham khảo, không phải tư vấn đầu tư hoặc giao dịch tài chính thật.</p></section>`;
+  document.getElementById('cancelPremium')?.addEventListener('click', cancelPremiumSubscription);
+}
+
+async function cancelPremiumSubscription() {
+  const ok = window.confirm('Bạn muốn hủy Premium Sandbox và quay lại gói Free? Thao tác này chỉ ảnh hưởng trạng thái demo, không phát sinh hoàn tiền thật.');
+  if (!ok) return;
+  try {
+    const button = document.getElementById('cancelPremium');
+    if (button) { button.disabled = true; button.textContent = 'Đang hủy Premium...'; }
+    const res = await fetchJson('/api/payment/cancel-subscription', { method: 'POST', timeout: 30000 });
+    persistPremiumSubscription(res.data || { active: false, plan_id: 'free' });
+    showToast(res.data?.message || 'Đã hủy Premium Sandbox. Tài khoản quay về gói Free.');
+    await renderBillingPage();
+  } catch (error) {
+    showToast(error.message);
+    const button = document.getElementById('cancelPremium');
+    if (button) { button.disabled = false; button.textContent = 'Hủy Premium, quay về Free'; }
+  }
 }
 
 async function renderPaymentResultPage() {
   const params = new URLSearchParams((location.hash.split('?')[1] || ''));
   const txnRef = params.get('txn_ref');
-  app.innerHTML = `<section class="page-head"><div><span class="eyebrow">Kết quả thanh toán</span><h1>VNPay Sandbox</h1><p class="lead">Frontend không tự tin URL trả về; nó gọi backend để đọc trạng thái đơn hàng mới nhất.</p></div></section><section id="paymentResult">${loadingCard(180)}</section>`;
+  const returnedStatus = params.get('status');
+  app.innerHTML = `<section class="page-head"><div><span class="eyebrow">Kết quả thanh toán</span><h1>VNPay Sandbox</h1><p class="lead">Thanh toán sandbox không phát sinh tiền thật. Hệ thống kiểm tra lại trạng thái đơn hàng từ backend.</p></div></section><section id="paymentResult">${loadingCard(180)}</section>`;
   const box = document.getElementById('paymentResult');
   if (!txnRef) { box.innerHTML = `<div class="state-box error">Thiếu mã giao dịch.</div>`; return; }
   try {
     const res = await fetchJson(`/api/payment/status?txn_ref=${encodeURIComponent(txnRef)}`);
-    const status = res.data.status;
-    box.innerHTML = `<div class="card"><span class="badge ${status === 'success' ? 'green' : status === 'failed' ? 'red' : 'amber'}">${status}</span><h2>Đơn hàng ${escapeHTML(txnRef)}</h2><p>Gói: ${escapeHTML(res.data.plan_id)} · Số tiền: ${formatVND(res.data.amount_vnd)}</p><p>Sandbox VNPay — không phải tiền thật.</p></div>`;
+    const status = res.data.status || returnedStatus;
+    if (status === 'success') {
+      try { persistPremiumSubscription(await getPremiumSubscription()); } catch (_) { persistPremiumSubscription({ active: true, plan_id: res.data.plan_id, plan_name: 'Premium Sandbox' }); }
+      showToast('Thanh toán Sandbox thành công. Premium đã được kích hoạt.');
+      box.innerHTML = `<div class="card payment-success-card"><span class="badge green">Thanh toán thành công</span><h2>Premium Sandbox đã được kích hoạt</h2><p>Đơn hàng: <strong>${escapeHTML(txnRef)}</strong></p><p>Gói: ${escapeHTML(res.data.plan_id)} · Số tiền demo: ${formatVND(res.data.amount_vnd)}</p><div class="grid three" style="margin-top:16px"><div class="card"><span class="badge violet">AI</span><h3>AI Advisor</h3><p>Mở kịch bản hỏi đáp nâng cao theo dữ liệu kỹ thuật, P2P và thuế/phí.</p></div><div class="card"><span class="badge amber">Alerts</span><h3>Cảnh báo</h3><p>Tạo cảnh báo mô phỏng cho giá, risk score và P2P spread.</p></div><div class="card"><span class="badge blue">Report</span><h3>Báo cáo</h3><p>Mô phỏng xuất báo cáo và lịch sử dữ liệu sâu hơn trong gói Premium.</p></div></div><div class="hero-actions" style="margin-top:18px"><a class="btn primary" href="#dashboard">Vào Dashboard Premium</a><a class="btn accent" href="#billing">Quản lý gói Premium</a><a class="btn secondary" href="#alerts">Tạo cảnh báo</a></div><p class="meta">Đây là thanh toán VNPay Sandbox/demo, không phát sinh tiền thật.</p></div>`;
+      return;
+    }
+    box.innerHTML = `<div class="card"><span class="badge ${status === 'failed' ? 'red' : 'amber'}">${escapeHTML(status || 'pending')}</span><h2>Đơn hàng ${escapeHTML(txnRef)}</h2><p>Gói: ${escapeHTML(res.data.plan_id)} · Số tiền: ${formatVND(res.data.amount_vnd)}</p><p>Sandbox VNPay — không phải tiền thật.</p><div class="hero-actions" style="margin-top:14px"><a class="btn secondary" href="#billing">Quay lại trang gói</a></div></div>`;
   } catch (error) { box.innerHTML = errorBox(error.message); }
 }

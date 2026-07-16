@@ -4,9 +4,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BTC BigData AI Advisor — Dashboard & Lý thuyết</title>
+  <title>BTC BigData Platform — Bitcoin Market Dashboard</title>
   <meta name="description"
-    content="Website minh chứng Chương 1-3: mô hình kinh doanh, Business Model Canvas và thử nghiệm nền tảng BTC BigData tích hợp AI." />
+    content="BTC BigData Platform giúp nhà đầu tư Bitcoin tại Việt Nam theo dõi thị trường, P2P spread, thuế, ví demo và AI Advisor trong một dashboard chuyên nghiệp." />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -15,6 +15,7 @@
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="/assets/mock-data.js"></script>
   <script type="module" src="/src/main.js"></script>
+  <script type="module" src="/src/platform-enhance.js"></script>
 </head>
 
 <body>
@@ -23,14 +24,15 @@
       <span class="brand-mark">₿</span>
       <span>
         <strong>BTC BigData</strong>
-        <small>AI Advisor</small>
+        <small>Platform</small>
       </span>
     </a>
 
     <nav id="mainNav" class="top-nav" aria-label="Điều hướng chính">
       <a href="#theory" data-route="theory">Lý thuyết 1–3</a>
       <a href="#dashboard" data-route="dashboard">Dashboard</a>
-      <div class="nav-dropdown" data-nav-group="tools" data-routes="chart,p2p,risk,news,reliability,guide,tax,settlement,chat,trade,about">
+      <div class="nav-dropdown" data-nav-group="tools"
+        data-routes="chart,p2p,risk,news,reliability,guide,tax,settlement,chat,trade,about">
         <button type="button" class="nav-drop-btn" aria-haspopup="true">Công cụ <span>▾</span></button>
         <div class="nav-dropdown-menu" role="menu">
           <a href="#chart" data-route="chart">Biểu đồ kỹ thuật</a>
@@ -46,7 +48,8 @@
           <a href="#about" data-route="about">Về dữ liệu</a>
         </div>
       </div>
-      <div class="nav-dropdown" data-nav-group="account" data-routes="login,account,history,alerts,billing,wallet,set-password,payment-result">
+      <div class="nav-dropdown" data-nav-group="account"
+        data-routes="login,account,history,alerts,billing,wallet,set-password,payment-result">
         <button type="button" class="nav-drop-btn" aria-haspopup="true">Tài khoản <span>▾</span></button>
         <div class="nav-dropdown-menu" role="menu">
           <a href="#login" data-route="login">Đăng nhập</a>
@@ -60,9 +63,12 @@
     </nav>
 
     <div class="top-actions">
+      <button id="themeToggle" class="theme-toggle" type="button" aria-label="Đổi giao diện sáng/tối"
+        title="Dark/Light Mode">☾</button>
       <div id="authBox" class="auth-box"></div>
       <button id="topTicker" class="ticker-pill" type="button" title="Giá BTC/USDT mới nhất">BTC/USDT&nbsp;<strong>Đang
           tải</strong></button>
+      <a class="btn small exchange-link" href="https://www.binance.com/vi/trade/BTC_USDT" target="_blank" rel="noopener noreferrer" title="Mở sàn giao dịch Bitcoin thật trong tab mới">Sàn BTC ↗</a>
       <a class="btn small primary" href="#dashboard">Demo</a>
       <button id="menuToggle" class="menu-toggle" aria-label="Mở menu">☰</button>
     </div>
@@ -70,8 +76,8 @@
 
   <aside id="sideNav" class="side-nav" aria-label="Sidebar">
     <div class="side-head">
-      <strong>BTC BigData</strong>
-      <span>Business Canvas + AI Demo</span>
+      <strong>BTC BigData Platform</strong>
+      <span>Bitcoin Market + Trading Demo</span>
     </div>
     <a href="#theory" data-route="theory"><span>☰</span>Lý thuyết 1–3</a>
     <div class="side-label">Nền tảng minh chứng</div>
@@ -98,8 +104,9 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <footer class="site-footer">
-    <strong>BTC BigData AI Advisor</strong>
-    <span>Công nghệ dịch vụ tài chính · <a href="#news">Tin tức BTC</a> · <a href="#reliability">Độ tin cậy dữ liệu</a> · Dữ liệu chỉ mang tính tham khảo.</span>
+    <strong>BTC BigData Platform</strong>
+    <span>Bitcoin market intelligence · <a href="#trade">Trading demo</a> · <a href="#news">Tin tức BTC</a> · <a
+        href="#reliability">Độ tin cậy dữ liệu</a> · Dữ liệu chỉ mang tính tham khảo.</span>
   </footer>
 </body>
 

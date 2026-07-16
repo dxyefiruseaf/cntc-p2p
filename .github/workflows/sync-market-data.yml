@@ -3,8 +3,9 @@ name: Sync Market Data to Supabase
 on:
   workflow_dispatch:
   schedule:
-    # Chạy mỗi giờ. GitHub Actions dùng UTC.
-    - cron: "0 * * * *"
+    # Chạy mỗi giờ vào phút 17. GitHub Actions dùng UTC.
+    # Tránh phút 00 vì GitHub Actions thường bị nghẽn/delay ở đầu giờ.
+    - cron: "17 * * * *"
 
 jobs:
   sync:

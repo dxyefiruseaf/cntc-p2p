@@ -240,6 +240,33 @@ def upsert_subscription(row: dict[str, Any]) -> None:
         return
     sb.table(SUBSCRIPTIONS_TABLE).upsert(row, on_conflict="user_id,plan_id").execute()
 
+
+def get_active_subscription(user_id: str) -> dict[str, Any] | None:
+    sb = _client()
+    if sb is None:
+        return None
+    res = (
+        sb.table(SUBSCRIPTIONS_TABLE)
+        .select("user_id,plan_id,active,expires_at")
+        .eq("user_id", user_id)
+        .eq("active", True)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def cancel_user_subscriptions(user_id: str) -> list[dict[str, Any]]:
+    sb = _client()
+    if sb is None:
+        return []
+    res = (
+        sb.table(SUBSCRIPTIONS_TABLE)
+        .update({"active": False})
+        .eq("user_id", user_id)
+        .execute()
+    )
+    return res.data or []
+
 # ---------------------------------------------------------------------------
 # Wallet demo repositories: QR top-up + e-wallet balance for course sandbox
 # ---------------------------------------------------------------------------
