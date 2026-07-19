@@ -1301,9 +1301,9 @@ async function askAI(question) {
 
 async function renderHistoryPage() {
   app.innerHTML = `
-    <section class="page-head"><div><span class="eyebrow">Lịch sử theo tài khoản</span><h1>Lịch sử AI và giao dịch demo</h1><p class="lead">Trang này yêu cầu đăng nhập. Lịch sử được đọc từ Supabase theo access token, không còn phụ thuộc localStorage.</p></div></section>
+    <section class="page-head"><div><span class="eyebrow">Lịch sử theo tài khoản</span><h1>Lịch sử AI và sàn giao dịch ảo</h1><p class="lead">Trang này yêu cầu đăng nhập. Lịch sử được đọc từ Supabase theo access token, không còn phụ thuộc localStorage.</p></div></section>
     <section class="card">
-      <div class="segmented" id="historyTabs"><button data-tab="ai" class="active">Lịch sử AI</button><button data-tab="trades">Giao dịch demo</button></div>
+      <div class="segmented" id="historyTabs"><button data-tab="ai" class="active">Lịch sử AI</button><button data-tab="trades">Lịch sử sàn ảo</button></div>
       <div id="historyContent" style="margin-top:16px">${loadingCard(360)}</div>
     </section>
   `;
@@ -1336,7 +1336,7 @@ async function loadAccountTradeHistory() {
   try {
     const res = await fetchJson('/api/demo-trades?limit=50');
     const rows = res.data.data || [];
-    box.innerHTML = rows.length ? `<div class="trade-history">${rows.map(tradeRowHTML).join('')}</div>` : `<div class="state-box empty">Chưa có giao dịch demo nào.</div>`;
+    box.innerHTML = rows.length ? `<div class="trade-history">${rows.map(tradeRowHTML).join('')}</div>` : `<div class="state-box empty">Chưa có lệnh giao dịch trên sàn ảo.</div>`;
   } catch (error) { box.innerHTML = errorBox(error.message); }
 }
 
@@ -1400,7 +1400,7 @@ function renderDecisionHubPage() {
         <ol>
           <li>Kiểm tra Risk Score và giá P2P.</li>
           <li>Lập kế hoạch mua/bán phù hợp vốn.</li>
-          <li>Lưu giao dịch demo để theo dõi PnL.</li>
+          <li>Lưu lệnh từ sàn giao dịch ảo để theo dõi PnL.</li>
           <li>Đặt cảnh báo và nhờ AI giải thích.</li>
         </ol>
       </div>

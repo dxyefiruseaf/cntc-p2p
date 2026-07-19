@@ -8,19 +8,6 @@
   <meta name="description"
     content="BTC BigData Platform giúp nhà đầu tư Bitcoin tại Việt Nam theo dõi thị trường, P2P spread, thuế, ví demo và AI Advisor trong một dashboard chuyên nghiệp." />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <script>
-    (() => {
-      try {
-        const key = 'btc_bigdata_platform_theme_v1';
-        const saved = localStorage.getItem(key);
-        const theme = saved === 'dark' || saved === 'light'
-          ? saved
-          : (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-        document.documentElement.dataset.theme = theme;
-        document.documentElement.style.colorScheme = theme;
-      } catch (_) { }
-    })();
-  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
@@ -45,7 +32,7 @@
       <a href="#theory" data-route="theory">Lý thuyết 1–3</a>
       <a href="#dashboard" data-route="dashboard">Dashboard</a>
       <div class="nav-dropdown" data-nav-group="tools"
-        data-routes="chart,p2p,risk,news,reliability,guide,tax,settlement,chat,trade,decision,about,paper-exchange">
+        data-routes="chart,p2p,risk,news,reliability,guide,tax,settlement,chat,trade,decision,about">
         <button type="button" class="nav-drop-btn" aria-haspopup="true">Công cụ <span>▾</span></button>
         <div class="nav-dropdown-menu" role="menu">
           <a href="#chart" data-route="chart">Biểu đồ kỹ thuật</a>
@@ -56,9 +43,8 @@
           <a href="#tax" data-route="tax">Ước tính thuế</a>
           <a href="#settlement" data-route="settlement">Tính thực nhận</a>
           <a href="#chat" data-route="chat">Chat AI</a>
-          <a href="#trade" data-route="trade">Giao dịch demo</a>
+          <a href="#trade" data-route="trade">Sàn giao dịch ảo BTC</a>
           <a href="#decision" data-route="decision">Decision Hub</a>
-          <a href="#paper-exchange" data-route="paper-exchange">Sàn giao dịch ảo</a>
         </div>
       </div>
       <div class="nav-dropdown" data-nav-group="account"
@@ -89,7 +75,7 @@
   <aside id="sideNav" class="side-nav" aria-label="Sidebar">
     <div class="side-head">
       <strong>BTC BigData Platform</strong>
-      <span>Bitcoin Market + Trading Demo</span>
+      <span>Bitcoin Market + Sàn giao dịch ảo</span>
     </div>
     <a href="#theory" data-route="theory"><span>☰</span>Lý thuyết 1–3</a>
     <div class="side-label">Nền tảng minh chứng</div>
@@ -102,7 +88,7 @@
     <a href="#tax" data-route="tax"><span>▣</span>Ước tính thuế</a>
     <a href="#settlement" data-route="settlement"><span>≋</span>Tính thực nhận</a>
     <a href="#chat" data-route="chat"><span>🤖</span>Chat AI</a>
-    <a href="#trade" data-route="trade"><span>↔</span>Giao dịch demo</a>
+    <a href="#trade" data-route="trade"><span>↔</span>Sàn giao dịch ảo BTC</a>
     <a href="#decision" data-route="decision"><span>🧭</span>Decision Hub</a>
     <a href="#history" data-route="history"><span>◷</span>Lịch sử cá nhân</a>
     <a href="#alerts" data-route="alerts"><span>✉</span>Cảnh báo Email</a>
