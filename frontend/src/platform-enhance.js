@@ -20,7 +20,8 @@ let marketContextCacheAt = 0;
 const SAFE_GET_INFLIGHT = new Map();
 const SAFE_GET_CACHE = new Map();
 const SAFE_GET_TTL = {
-  '/api/latest': 20000,
+  '/api/overview': 45000,
+  '/api/latest': 45000,
   '/api/risk-score': 60000,
   '/api/p2p-comparison': 120000,
   '/api/p2p-spread': 120000,
@@ -107,7 +108,7 @@ function safeGetTtl(endpoint) {
   return SAFE_GET_TTL[clean] || 30000;
 }
 
-async function safeGet(endpoint, timeoutMs = 7500, base = DATA_API_BASE) {
+async function safeGet(endpoint, timeoutMs = 12000, base = DATA_API_BASE) {
   const url = apiUrl(endpoint, base);
   const cacheKey = `GET:${url}`;
   const now = Date.now();
@@ -345,19 +346,20 @@ async function getMarketContext(force = false) {
   if (!force && marketContextPromise) return marketContextPromise;
 
   marketContextPromise = (async () => {
-    const [latest, risk, p2p] = await Promise.allSettled([
-      safeGet('/api/latest', 6500, DATA_API_BASE),
-      safeGet('/api/risk-score', 6500, DATA_API_BASE),
-      safeGet('/api/p2p-comparison', 6500, DATA_API_BASE)
-    ]);
-    const ctx = {
-      latest: latest.status === 'fulfilled' ? latest.value : marketContextCache?.latest || null,
-      risk: risk.status === 'fulfilled' ? risk.value : marketContextCache?.risk || null,
-      p2p: p2p.status === 'fulfilled' ? p2p.value : marketContextCache?.p2p || null
-    };
-    marketContextCache = ctx;
-    marketContextCacheAt = Date.now();
-    return ctx;
+    try {
+      const overview = await safeGet('/api/overview?hours=24', 14000, DATA_API_BASE);
+      const ctx = {
+        latest: overview?.latest || marketContextCache?.latest || null,
+        risk: overview?.risk || marketContextCache?.risk || null,
+        p2p: overview?.comparison || marketContextCache?.p2p || null
+      };
+      marketContextCache = ctx;
+      marketContextCacheAt = Date.now();
+      return ctx;
+    } catch (error) {
+      if (marketContextCache) return marketContextCache;
+      throw error;
+    }
   })();
 
   try {
@@ -923,8 +925,16 @@ function enhanceCurrentRoute() {
     document.body.dataset.route = route;
   }
   if (route === 'decision') {
-    if (app?.querySelector('[data-platform-route="decision"]')) return;
-    return renderDecisionHub();
+    // Trang Decision chính được render và bind sự kiện trong main.js.
+    // Không render đè bằng phiên bản legacy ở platform-enhance.js vì sẽ:
+    // - tạo hai bộ giao diện/chức năng trùng nhau;
+    // - làm mất CSS của Decision Hub mới;
+    // - khiến .ai-decision-output min-height:100% kéo dài tới footer.
+    if (marketStripTimer) {
+      clearInterval(marketStripTimer);
+      marketStripTimer = null;
+    }
+    return;
   }
   if (route === 'paper-exchange' || route === 'exchange' || route === 'simulator') {
     location.replace('#trade');
@@ -951,7 +961,8 @@ function installRouteObserver() {
   window.addEventListener('hashchange', () => scheduleEnhance(140));
   const observer = new MutationObserver(() => {
     const route = getRoute();
-    if (route === 'decision' && app?.querySelector('[data-platform-route="decision"]')) return;
+    // main.js sở hữu toàn bộ trang Decision; tránh observer gọi lại renderer legacy.
+    if (route === 'decision') return;
     scheduleEnhance(120);
   });
   if (app) observer.observe(app, { childList: true, subtree: false });

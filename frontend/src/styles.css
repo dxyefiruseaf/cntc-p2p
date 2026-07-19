@@ -5042,3 +5042,587 @@ html[data-theme="dark"] .trade-side-toggle button.active {
     transition: none;
   }
 }
+
+/* =====================================================================
+   Decision Hub legacy markup compatibility
+   Giữ nguyên toàn bộ chức năng hiện tại, chỉ khôi phục bố cục và theme
+   cho renderDecisionHubPage() đang dùng các class decision-hero-pro,
+   decision-layout, decision-card-head và decision-ai-card.
+   ===================================================================== */
+
+.decision-page-head.decision-hero-pro {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, .75fr);
+  gap: 22px;
+  align-items: stretch;
+  width: 100%;
+  margin-bottom: 20px;
+  padding: 26px;
+  overflow: hidden;
+  border: 1px solid var(--platform-border, var(--border));
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at 8% 12%, rgba(247, 147, 26, .14), transparent 34%),
+    linear-gradient(135deg, var(--platform-surface, var(--card)), var(--platform-surface-2, var(--card-soft)));
+  box-shadow: var(--platform-shadow, var(--shadow-sm));
+}
+
+.decision-page-head.decision-hero-pro::after {
+  content: "";
+  position: absolute;
+  right: -100px;
+  bottom: -140px;
+  width: 260px;
+  height: 260px;
+  border-radius: 50%;
+  background: rgba(37, 99, 235, .1);
+  pointer-events: none;
+}
+
+.decision-page-head.decision-hero-pro>* {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+
+.decision-page-head.decision-hero-pro h1 {
+  margin-top: 10px;
+  max-width: 760px;
+}
+
+.decision-page-head.decision-hero-pro .lead {
+  max-width: 780px;
+}
+
+.decision-hero-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.decision-hero-tags span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 11px;
+  border: 1px solid var(--platform-border, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--platform-surface, #fff) 82%, transparent);
+  color: var(--platform-text, var(--text));
+  font-size: .75rem;
+  font-weight: 800;
+}
+
+.decision-hero-panel {
+  display: grid;
+  align-content: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--platform-border, var(--border));
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--platform-surface, #fff) 88%, transparent);
+}
+
+.decision-hero-panel>strong {
+  color: var(--platform-text, var(--text));
+  font-size: 1rem;
+}
+
+.decision-hero-panel ol {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--platform-muted, var(--muted));
+  line-height: 1.55;
+}
+
+.decision-hero-panel li+li {
+  margin-top: 6px;
+}
+
+.decision-feature-grid.pro {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+  margin: 0 0 20px;
+}
+
+.decision-feature-card {
+  display: grid;
+  align-content: start;
+  min-width: 0;
+  min-height: 146px;
+  padding: 16px;
+  border: 1px solid var(--platform-border, var(--border));
+  border-radius: 20px;
+  background: var(--platform-surface, var(--card));
+  box-shadow: var(--platform-shadow-sm, var(--shadow-sm));
+}
+
+.decision-feature-card>span {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  margin-bottom: 12px;
+  border-radius: 13px;
+  background: rgba(247, 147, 26, .12);
+  font-size: 1.15rem;
+}
+
+.decision-feature-card strong {
+  color: var(--platform-text, var(--text));
+  font-size: .92rem;
+}
+
+.decision-feature-card p {
+  margin: 6px 0 0;
+  color: var(--platform-muted, var(--muted));
+  font-size: .8rem;
+  line-height: 1.45;
+}
+
+.decision-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  width: 100%;
+  margin-bottom: 18px;
+}
+
+.decision-layout>*,
+.decision-ai-card {
+  min-width: 0;
+}
+
+.decision-layout .decision-card-large {
+  grid-column: 1 / -1;
+}
+
+.decision-card {
+  width: 100%;
+  max-width: none;
+  height: auto;
+  min-height: 0;
+  padding: 20px;
+  border-color: var(--platform-border, var(--border));
+  background: var(--platform-surface, var(--card));
+  color: var(--platform-text, var(--text));
+}
+
+.decision-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.decision-card-head>div {
+  min-width: 0;
+}
+
+.decision-card-head h3 {
+  margin: 0 0 5px;
+  color: var(--platform-text, var(--text));
+  font-size: 1.02rem;
+  line-height: 1.3;
+}
+
+.decision-card-head p {
+  margin: 0;
+  color: var(--platform-muted, var(--muted));
+  font-size: .82rem;
+  line-height: 1.5;
+}
+
+.step-badge {
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: rgba(124, 58, 237, .13);
+  color: #7c3aed;
+  font-size: .78rem;
+  font-weight: 900;
+}
+
+.step-badge.blue {
+  background: rgba(37, 99, 235, .13);
+  color: #2563eb;
+}
+
+.step-badge.amber {
+  background: rgba(245, 158, 11, .15);
+  color: #b45309;
+}
+
+.step-badge.green {
+  background: rgba(34, 197, 94, .14);
+  color: #15803d;
+}
+
+.step-badge.dark {
+  background: rgba(15, 23, 42, .1);
+  color: var(--platform-text, var(--text));
+}
+
+.decision-form-grid {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  margin: 0 0 14px;
+}
+
+.decision-form-grid.plan-grid,
+.decision-form-grid.real-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.decision-form-grid.portfolio-grid,
+.decision-form-grid.alert-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.decision-card .field {
+  min-width: 0;
+}
+
+.decision-card .field label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--platform-text, var(--text));
+  font-size: .76rem;
+  font-weight: 800;
+}
+
+.decision-card input,
+.decision-card select,
+.decision-card textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--platform-border, var(--border));
+  border-radius: 13px;
+  padding: 10px 11px;
+  background: var(--platform-input, var(--platform-surface, #fff));
+  color: var(--platform-text, var(--text));
+  font: inherit;
+  line-height: 1.4;
+}
+
+.decision-card textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
+.decision-card input::placeholder,
+.decision-card textarea::placeholder {
+  color: var(--platform-muted, var(--muted));
+  opacity: .8;
+}
+
+.decision-card input:focus,
+.decision-card select:focus,
+.decision-card textarea:focus {
+  outline: 3px solid rgba(37, 99, 235, .13);
+  border-color: rgba(37, 99, 235, .5);
+}
+
+.decision-card .hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.decision-card .btn.full {
+  width: 100%;
+  justify-content: center;
+}
+
+.decision-result.compact,
+.ai-explain-result.decision-result.compact {
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  margin-top: 14px;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--platform-text, var(--text));
+  white-space: normal;
+}
+
+.decision-result.compact:empty,
+.ai-explain-result.decision-result.compact:empty {
+  display: none;
+}
+
+.decision-result.compact>.state-box,
+.decision-result.compact>.decision-result-panel,
+.decision-result.compact>.decision-kpi-grid,
+.ai-explain-result.decision-result.compact>.msg {
+  width: 100%;
+  margin: 0;
+}
+
+.decision-result-panel,
+.decision-advice,
+.decision-breakdown>div,
+.decision-kpi-grid>div {
+  border: 1px solid var(--platform-border, var(--border));
+  background: var(--platform-surface-2, var(--card-soft));
+}
+
+.decision-result-panel {
+  padding: 15px;
+  border-radius: 17px;
+}
+
+.decision-summary-line {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.decision-breakdown,
+.decision-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.decision-breakdown>div,
+.decision-kpi-grid>div {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 14px;
+}
+
+.decision-breakdown span,
+.decision-kpi-grid span {
+  display: block;
+  color: var(--platform-muted, var(--muted));
+  font-size: .72rem;
+  font-weight: 800;
+}
+
+.decision-breakdown strong,
+.decision-kpi-grid strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--platform-text, var(--text));
+  overflow-wrap: anywhere;
+}
+
+.decision-breakdown small,
+.decision-kpi-grid small {
+  display: block;
+  margin-top: 4px;
+  color: var(--platform-muted, var(--muted));
+  line-height: 1.35;
+}
+
+.decision-advice {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+}
+
+.decision-advice p {
+  color: var(--platform-text, var(--text));
+}
+
+.decision-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.decision-ai-card {
+  display: block;
+  width: 100%;
+  margin: 0 0 18px;
+  padding: 20px;
+}
+
+.decision-ai-card #aiExplainBtn {
+  width: auto;
+  min-width: 180px;
+  margin-top: 2px;
+}
+
+.ai-explain-result .decision-ai-message,
+.ai-explain-result .msg.ai {
+  display: block;
+  width: 100%;
+  max-width: none;
+  padding: 15px 16px;
+  border: 1px solid var(--platform-border, var(--border));
+  border-radius: 16px;
+  background: var(--platform-surface-2, var(--card-soft));
+  color: var(--platform-text, var(--text));
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.decision-disclaimer {
+  width: 100%;
+  margin: 0 0 28px;
+  padding: 14px 16px;
+  border: 1px solid rgba(245, 158, 11, .28);
+  border-radius: 17px;
+  background: rgba(245, 158, 11, .08);
+  color: var(--platform-text, var(--text));
+  line-height: 1.5;
+}
+
+body[data-theme="dark"] .decision-page-head.decision-hero-pro,
+html[data-theme="dark"] .decision-page-head.decision-hero-pro,
+body[data-theme="dark"] .decision-feature-card,
+html[data-theme="dark"] .decision-feature-card,
+body[data-theme="dark"] .decision-card,
+html[data-theme="dark"] .decision-card,
+body[data-theme="dark"] .decision-hero-panel,
+html[data-theme="dark"] .decision-hero-panel {
+  background-color: var(--platform-surface, #0f172a);
+  color: var(--platform-text, #f8fafc);
+}
+
+body[data-theme="dark"] .decision-card input,
+body[data-theme="dark"] .decision-card select,
+body[data-theme="dark"] .decision-card textarea,
+html[data-theme="dark"] .decision-card input,
+html[data-theme="dark"] .decision-card select,
+html[data-theme="dark"] .decision-card textarea {
+  background: rgba(2, 6, 23, .62);
+  color: #f8fafc;
+  border-color: rgba(148, 163, 184, .24);
+}
+
+body[data-theme="dark"] .step-badge.dark,
+html[data-theme="dark"] .step-badge.dark {
+  background: rgba(226, 232, 240, .12);
+  color: #f8fafc;
+}
+
+@media (max-width: 1180px) {
+  .decision-feature-grid.pro {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .decision-form-grid.plan-grid,
+  .decision-form-grid.real-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+
+  .decision-page-head.decision-hero-pro,
+  .decision-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .decision-layout .decision-card-large {
+    grid-column: auto;
+  }
+
+  .decision-feature-grid.pro {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .decision-form-grid.portfolio-grid,
+  .decision-form-grid.alert-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .decision-breakdown,
+  .decision-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+
+  .decision-page-head.decision-hero-pro,
+  .decision-card,
+  .decision-ai-card {
+    padding: 16px;
+    border-radius: 20px;
+  }
+
+  .decision-feature-grid.pro,
+  .decision-form-grid.plan-grid,
+  .decision-form-grid.real-grid,
+  .decision-breakdown,
+  .decision-kpi-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .decision-feature-card {
+    min-height: 0;
+  }
+
+  .decision-card .hero-actions,
+  .decision-card .hero-actions .btn,
+  .decision-ai-card #aiExplainBtn {
+    width: 100%;
+  }
+}
+
+/* ================================================================
+   Decision Hub: ngăn renderer legacy kéo AI result xuống footer
+   ================================================================ */
+body[data-route="decision"] .decision-layout,
+body[data-route="decision"] .decision-pro-grid {
+  align-items: start;
+}
+
+body[data-route="decision"] .decision-ai-card,
+body[data-route="decision"] #aiTradeExplanationCard,
+body[data-route="decision"] .decision-pro-grid>.decision-wide {
+  align-self: start;
+  height: auto;
+  min-height: 0;
+}
+
+body[data-route="decision"] #aiExplainResult,
+body[data-route="decision"] .ai-explain-result,
+body[data-route="decision"] .decision-pro-grid .ai-decision-output {
+  box-sizing: border-box;
+  width: 100%;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow: visible;
+}
+
+/* Chỉ áp dụng cho giao diện Decision legacy nếu bundle cũ còn trong cache. */
+body[data-route="decision"] .decision-pro-grid .ai-decision-output {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--platform-border, var(--border));
+  border-radius: 16px;
+  background: var(--platform-surface-2, var(--card-soft));
+  color: var(--platform-text, var(--text));
+  white-space: normal;
+}
+
+body[data-route="decision"] .decision-pro-grid .ai-decision-output:empty {
+  display: none;
+}
+
+body[data-route="decision"] .site-footer {
+  clear: both;
+}

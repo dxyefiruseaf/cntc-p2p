@@ -7,6 +7,7 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').
 // Nếu chưa cấu hình VITE_DATA_API_BASE_URL, toàn bộ request vẫn chạy qua API_BASE như cũ.
 const DATA_API_BASE = (import.meta.env.VITE_DATA_API_BASE_URL || API_BASE).replace(/\/+$/, '');
 const LIVE_NEWS_HIDDEN_KEY = 'btc_bigdata_live_news_hidden_v1';
+const API_CACHE_PREFIX = 'btc_api_cache_v4:';
 
 const DATA_ENDPOINT_PREFIXES = [
   '/api/latest',
@@ -227,8 +228,18 @@ function badge(signal) {
 
 function sourcePill(source) {
   const normalized = String(source || '').toLowerCase();
-  const isLive = ['api', 'rss', 'rss_cache', 'supabase'].includes(normalized);
-  const label = normalized === 'rss' ? '● RSS tin tức' : normalized === 'rss_cache' ? '● RSS cache' : isLive ? '● API thật' : '● Demo fallback';
+  const isLive = ['api', 'rss', 'rss_cache', 'supabase', 'cache'].includes(normalized);
+  const label = normalized === 'rss'
+    ? '● RSS tin tức'
+    : normalized === 'rss_cache'
+      ? '● RSS cache'
+      : normalized === 'cache'
+        ? '● Cache nhanh'
+        : normalized === 'stale_cache'
+          ? '● Cache cũ'
+          : isLive
+            ? '● API thật'
+            : '● Demo fallback';
   return `<span class="source-pill ${isLive ? 'api' : 'mock'}">${label}</span>`;
 }
 
@@ -330,6 +341,17 @@ function buildMockNews() {
 }
 
 function mockFor(endpoint) {
+  if (endpoint.startsWith('/api/overview')) {
+    const hours = Number(new URLSearchParams(endpoint.split('?')[1] || '').get('hours') || 24);
+    const latest = window.MOCK_DATA.latest || {};
+    const summary = window.MOCK_DATA.summary || {};
+    const ohlcv = normalizeOhlcv(hours);
+    const p2p = normalizeP2P(Math.min(hours, 24));
+    const comparison = buildMockP2PComparison();
+    const risk = buildMockRiskScore();
+    const alerts = buildMockMarketAlerts();
+    return { generated_at: new Date().toISOString(), latest, latest_source: 'mock', summary, ohlcv, ohlcv_source: 'mock', risk, alerts, p2p, p2p_source: 'mock', comparison: { sell: comparison.sell, buy: comparison.buy }, data_status: {} };
+  }
   if (endpoint.startsWith('/api/latest')) return window.MOCK_DATA.latest;
   if (endpoint.startsWith('/api/indicators/summary')) return window.MOCK_DATA.summary;
   if (endpoint.startsWith('/api/ohlcv')) {
@@ -346,6 +368,22 @@ function mockFor(endpoint) {
   if (endpoint.startsWith('/api/p2p-comparison')) return buildMockP2PComparison();
   if (endpoint.startsWith('/api/news/latest')) return buildMockNews();
   if (endpoint.startsWith('/api/ai/history')) return window.MOCK_DATA.aiHistory || { count: 0, data: [] };
+  if (endpoint.startsWith('/api/demo-trades/terminal')) {
+    const hours = Number(new URLSearchParams(endpoint.split('?')[1] || '').get('hours') || 168);
+    const ohlcv = normalizeOhlcv(hours);
+    const p2p = normalizeP2P(Math.min(hours, 24));
+    const latest = window.MOCK_DATA.latest || {};
+    return {
+      generated_at: new Date().toISOString(),
+      latest: { data: latest, source: 'mock' },
+      ohlcv: { data: ohlcv, source: 'mock' },
+      p2p: { data: p2p, source: 'mock' },
+      risk: { data: buildMockRiskScore() },
+      wallet: { wallet: { balance_vnd: 100000, balance_usdt_demo: 0 } },
+      trades: { count: 0, data: [], portfolio: { position_btc: 0, avg_entry_vnd: 0, realized_pnl_vnd: 0, trades_count: 0, buys: 0, sells: 0, total_buy_vnd: 0, total_sell_vnd: 0 } },
+      data_status: { latest_ohlcv_timestamp: latest.timestamp, is_ohlcv_fresh: false, is_p2p_fresh: false }
+    };
+  }
   if (endpoint.startsWith('/api/wallet/me')) return { wallet: { balance_vnd: 100000, balance_usdt_demo: 0 }, transactions: [], sandbox: true, disclaimer: 'Ví demo fallback khi backend chưa sẵn sàng.' };
   if (endpoint.startsWith('/api/payment/subscription')) {
     const raw = localStorage.getItem('btc_premium_subscription');
@@ -357,11 +395,79 @@ function mockFor(endpoint) {
   return null;
 }
 
+function apiCacheTtl(endpoint) {
+  if (endpoint.startsWith('/api/overview')) return 45_000;
+  if (endpoint.startsWith('/api/latest')) return 45_000;
+  if (endpoint.startsWith('/api/indicators/summary')) return 60_000;
+  if (endpoint.startsWith('/api/risk-score') || endpoint.startsWith('/api/market-alerts')) return 60_000;
+  if (endpoint.startsWith('/api/ohlcv')) return 180_000;
+  if (endpoint.startsWith('/api/p2p')) return 120_000;
+  if (endpoint.startsWith('/api/news')) return 300_000;
+  if (endpoint.startsWith('/api/data-')) return 90_000;
+  if (endpoint.startsWith('/api/demo-trades/terminal')) return 20_000;
+  if (endpoint.startsWith('/api/demo-trades') || endpoint.startsWith('/api/wallet/me')) return 15_000;
+  if (endpoint.startsWith('/api/ai/history')) return 30_000;
+  return 30_000;
+}
+
+function apiCacheKey(url) {
+  const userScope = currentSession?.user?.id || (currentSession?.access_token ? 'auth' : 'anon');
+  return `${API_CACHE_PREFIX}${userScope}:${url}`;
+}
+
+function readApiCache(key, maxAge = Infinity) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const age = Date.now() - Number(parsed.savedAt || 0);
+    if (!parsed.data || age > maxAge) return null;
+    return { data: parsed.data, age };
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeApiCache(key, data) {
+  try {
+    const raw = JSON.stringify({ savedAt: Date.now(), data });
+    // Tránh làm đầy sessionStorage khi endpoint trả lịch sử quá lớn.
+    if (raw.length <= 1_500_000) sessionStorage.setItem(key, raw);
+  } catch (_) { }
+}
+
+function clearApiCache() {
+  try {
+    for (let i = sessionStorage.length - 1; i >= 0; i -= 1) {
+      const key = sessionStorage.key(i);
+      if (key?.startsWith(API_CACHE_PREFIX)) sessionStorage.removeItem(key);
+    }
+  } catch (_) { }
+  fetchJson._memoryCache?.clear();
+}
+
 async function fetchJson(endpoint, options = {}) {
   const method = String(options.method || 'GET').toUpperCase();
   const isGet = method === 'GET';
   const url = apiUrl(endpoint);
-  const requestKey = isGet ? `${url}|${currentSession?.access_token ? 'auth' : 'anon'}` : '';
+  const requestKey = isGet ? `${url}|${currentSession?.user?.id || (currentSession?.access_token ? 'auth' : 'anon')}` : '';
+  const ttl = Number(options.cacheTtl ?? apiCacheTtl(endpoint));
+  const useCache = isGet && options.cache !== false;
+  const forceRefresh = options.forceRefresh === true;
+  const storageKey = apiCacheKey(url);
+
+  fetchJson._memoryCache ||= new Map();
+  if (useCache && !forceRefresh) {
+    const memory = fetchJson._memoryCache.get(requestKey);
+    if (memory && Date.now() - memory.savedAt <= ttl) {
+      return { data: memory.data, source: 'cache', cached: true };
+    }
+    const stored = readApiCache(storageKey, ttl);
+    if (stored) {
+      fetchJson._memoryCache.set(requestKey, { savedAt: Date.now() - stored.age, data: stored.data });
+      return { data: stored.data, source: 'cache', cached: true };
+    }
+  }
 
   if (isGet) {
     fetchJson._inFlight ||= new Map();
@@ -370,7 +476,7 @@ async function fetchJson(endpoint, options = {}) {
 
   const requestPromise = (async () => {
     const controller = new AbortController();
-    const timeoutMs = options.timeout ?? 30000;
+    const timeoutMs = Number(options.timeout ?? (isGet ? 12_000 : 20_000));
     const timeout = timeoutMs > 0
       ? setTimeout(() => controller.abort(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs)
       : null;
@@ -379,9 +485,9 @@ async function fetchJson(endpoint, options = {}) {
         method,
         headers: { 'Content-Type': 'application/json', ...authHeader(), ...(options.headers || {}) },
         body: options.body ? JSON.stringify(options.body) : undefined,
-        signal: controller.signal
+        signal: controller.signal,
+        keepalive: false
       });
-      if (timeout) clearTimeout(timeout);
       if (!response.ok) {
         let detail = `HTTP ${response.status}`;
         try {
@@ -390,13 +496,28 @@ async function fetchJson(endpoint, options = {}) {
         } catch (_) { }
         throw new Error(detail);
       }
-      return { data: await response.json(), source: 'api' };
+      const data = await response.json();
+      if (useCache) {
+        fetchJson._memoryCache.set(requestKey, { savedAt: Date.now(), data });
+        writeApiCache(storageKey, data);
+      } else if (!isGet) {
+        clearApiCache();
+      }
+      return { data, source: 'api' };
     } catch (error) {
-      if (timeout) clearTimeout(timeout);
+      // Dùng dữ liệu cache cũ trước fallback demo để trang vẫn mở ngay khi
+      // Render cold-start hoặc Supabase phản hồi chậm.
+      if (useCache) {
+        const memory = fetchJson._memoryCache.get(requestKey);
+        if (memory?.data) return { data: memory.data, source: 'stale_cache', cached: true, error };
+        const stale = readApiCache(storageKey, 6 * 60 * 60 * 1000);
+        if (stale) return { data: stale.data, source: 'stale_cache', cached: true, error };
+      }
       const fallback = mockFor(endpoint);
       if (fallback) return { data: fallback, source: 'mock', error };
       throw error;
     } finally {
+      if (timeout) clearTimeout(timeout);
       if (isGet) fetchJson._inFlight?.delete(requestKey);
     }
   })();
@@ -778,18 +899,16 @@ async function renderDashboardPage() {
   `;
   document.getElementById('refreshDashboard').addEventListener('click', renderDashboardPage);
   try {
-    const [latestRes, summaryRes, ohlcvRes, riskRes, alertsRes] = await Promise.all([
-      fetchJson('/api/latest'),
-      fetchJson('/api/indicators/summary'),
-      fetchJson('/api/ohlcv?hours=24'),
-      fetchJson('/api/risk-score'),
-      fetchJson('/api/market-alerts')
-    ]);
+    // Một snapshot tổng hợp thay cho 5 request riêng. Khi backend host vừa
+    // cold-start, Dashboard chỉ phải chờ một request và có thể dùng cache cũ.
+    const overviewRes = await fetchJson('/api/overview?hours=24', { timeout: 14_000, cacheTtl: 45_000 });
+    const overview = overviewRes.data || {};
+    const latestRes = { data: overview.latest || {}, source: overview.latest_source || overviewRes.source };
     const latest = latestRes.data;
-    const summary = summaryRes.data;
-    const ohlcv = ohlcvRes.data;
-    const risk = riskRes.data;
-    const alerts = alertsRes.data.data || [];
+    const summary = overview.summary || {};
+    const ohlcv = overview.ohlcv || normalizeOhlcv(24);
+    const risk = overview.risk || buildMockRiskScore();
+    const alerts = overview.alerts?.data || [];
     const change = latest.open ? ((latest.close - latest.open) / latest.open) * 100 : 0;
     const verdict = summary.overall?.verdict || 'NEUTRAL';
     const signals = summary.signals || {};
@@ -1365,18 +1484,15 @@ function setSmartAlerts(rows) {
 }
 
 async function getDecisionMarketContext() {
-  const [latestRes, riskRes, p2pRes] = await Promise.all([
-    fetchJson('/api/latest', { timeout: 9000 }),
-    fetchJson('/api/risk-score', { timeout: 9000 }),
-    fetchJson('/api/p2p-comparison', { timeout: 9000 })
-  ]);
-  const latest = latestRes.data || {};
-  const risk = riskRes.data || buildMockRiskScore();
-  const p2p = p2pRes.data || buildMockP2PComparison();
+  const overviewRes = await fetchJson('/api/overview?hours=24', { timeout: 14_000, cacheTtl: 45_000 });
+  const overview = overviewRes.data || {};
+  const latest = overview.latest || {};
+  const risk = overview.risk || buildMockRiskScore();
+  const p2p = overview.comparison || buildMockP2PComparison();
   const buyPrice = Number(p2p.buy?.p2p_price || p2p.buy?.market_price || p2p.sell?.market_price || 26000);
   const sellPrice = Number(p2p.sell?.p2p_price || p2p.sell?.market_price || p2p.buy?.market_price || 26000);
   const btcUsd = Number(latest.close || risk.price || window.MOCK_DATA?.latest?.close || 0);
-  return { latest, risk, p2p, buyPrice, sellPrice, btcUsd, source: [latestRes.source, riskRes.source, p2pRes.source].join('/') };
+  return { latest, risk, p2p, buyPrice, sellPrice, btcUsd, source: overviewRes.source };
 }
 
 function riskTone(score) {
@@ -1696,14 +1812,20 @@ async function loadTradeTerminal() {
   root.innerHTML = loadingCard(860);
 
   try {
-    const [latestRes, ohlcvRes, p2pRes, riskRes, walletRes, tradesRes] = await Promise.all([
-      fetchJson('/api/latest'),
-      fetchJson(`/api/ohlcv?hours=${tradeTerminalHours}`),
-      fetchJson(`/api/p2p-spread?hours=${tradeTerminalHours}`, { timeout: 30000 }),
-      fetchJson('/api/risk-score'),
-      fetchJson('/api/wallet/me'),
-      fetchJson('/api/demo-trades?limit=50')
-    ]);
+    // Một request tổng hợp thay cho 6 request song song. Điều này đặc biệt
+    // quan trọng khi backend Render vừa cold-start: chỉ một kết nối phải chờ
+    // và một thành phần chậm không còn làm toàn bộ terminal timeout.
+    const terminalRes = await fetchJson(
+      `/api/demo-trades/terminal?hours=${tradeTerminalHours}&limit=20`,
+      { timeout: 16_000, cacheTtl: 20_000 }
+    );
+    const snapshot = terminalRes.data || {};
+    const latestRes = { data: snapshot.latest?.data || {}, source: snapshot.latest?.source || terminalRes.source };
+    const ohlcvRes = { data: snapshot.ohlcv?.data || normalizeOhlcv(tradeTerminalHours), source: snapshot.ohlcv?.source || terminalRes.source };
+    const p2pRes = { data: snapshot.p2p?.data || normalizeP2P(24), source: snapshot.p2p?.source || terminalRes.source };
+    const riskRes = { data: snapshot.risk?.data || buildMockRiskScore(), source: terminalRes.source };
+    const walletRes = { data: snapshot.wallet || { wallet: {} }, source: terminalRes.source };
+    const tradesRes = { data: snapshot.trades || { data: [], portfolio: {} }, source: terminalRes.source };
 
     const latest = latestRes.data || {};
     const ohlcv = ohlcvRes.data || {};
