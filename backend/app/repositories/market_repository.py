@@ -398,3 +398,124 @@ def debit_wallet_for_payment(user_id: str, amount_vnd: int | float, description:
         "ref_id": ref_id,
     })
     return {"wallet": get_wallet_for_user(user_id), "transaction": tx}
+
+
+def credit_wallet_balance(user_id: str, amount_vnd: int | float, description: str, ref_id: str | None = None) -> dict[str, Any]:
+    """Credit VND back to the demo wallet, for example after a SELL trade."""
+    sb = _client()
+    if sb is None:
+        raise ValueError("Supabase chưa được cấu hình")
+    wallet = get_wallet_for_user(user_id)
+    current = _num(wallet.get("balance_vnd"))
+    amount = _num(amount_vnd)
+    new_balance = current + amount
+    updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    sb.table(WALLETS_TABLE).update({"balance_vnd": new_balance, "updated_at": updated_at}).eq("user_id", user_id).execute()
+    tx = _insert_wallet_transaction({
+        "user_id": user_id,
+        "type": "trade_credit",
+        "amount_vnd": amount,
+        "balance_after_vnd": new_balance,
+        "description": description,
+        "ref_id": ref_id,
+    })
+    return {"wallet": get_wallet_for_user(user_id), "transaction": tx}
+
+
+def summarize_demo_trades(user_id: str, limit: int = 500) -> dict[str, Any]:
+    """Summarise the virtual BTC portfolio from recorded demo trades.
+
+    The legacy `amount_usdt` field is reused as the simulated BTC quantity in the
+    trading-terminal UI. This keeps the database schema unchanged while still
+    allowing a realistic wallet + portfolio flow for classroom demos.
+    """
+    rows = list(reversed(list_demo_trades(user_id, limit)))
+    position_btc = 0.0
+    cost_basis_vnd = 0.0
+    realized_pnl_vnd = 0.0
+    total_buy_vnd = 0.0
+    total_sell_vnd = 0.0
+    buys = 0
+    sells = 0
+
+    for row in rows:
+        side = str(row.get("side") or "").upper()
+        qty = _num(row.get("amount_usdt"))
+        gross_vnd = _num(row.get("amount_vnd"))
+        if qty <= 0 or gross_vnd <= 0:
+            continue
+
+        if side == "BUY":
+            position_btc += qty
+            cost_basis_vnd += gross_vnd
+            total_buy_vnd += gross_vnd
+            buys += 1
+            continue
+
+        if side == "SELL":
+            sells += 1
+            total_sell_vnd += gross_vnd
+            if position_btc > 0:
+                used_qty = min(qty, position_btc)
+                avg_cost = cost_basis_vnd / position_btc if position_btc > 0 else 0.0
+                released_cost = avg_cost * used_qty
+                realized_pnl_vnd += gross_vnd - released_cost
+                position_btc -= used_qty
+                cost_basis_vnd = max(0.0, cost_basis_vnd - released_cost)
+
+    avg_entry_vnd = cost_basis_vnd / position_btc if position_btc > 0 else 0.0
+    return {
+        "position_btc": round(position_btc, 8),
+        "avg_entry_vnd": round(avg_entry_vnd, 2),
+        "cost_basis_vnd": round(cost_basis_vnd, 2),
+        "realized_pnl_vnd": round(realized_pnl_vnd, 2),
+        "total_buy_vnd": round(total_buy_vnd, 2),
+        "total_sell_vnd": round(total_sell_vnd, 2),
+        "buys": buys,
+        "sells": sells,
+        "trades_count": len(rows),
+    }
+
+
+def execute_demo_trade(
+    user_id: str,
+    side: str,
+    amount_vnd: int | float,
+    amount_asset: int | float,
+    price_source: str,
+    applied_price: int | float | None = None,
+) -> dict[str, Any] | None:
+    side_norm = str(side or "").upper().strip()
+    if side_norm not in {"BUY", "SELL"}:
+        raise ValueError("Chiều giao dịch phải là BUY hoặc SELL")
+
+    gross_vnd = _num(amount_vnd)
+    amount_btc = _num(amount_asset)
+    if gross_vnd <= 0 or amount_btc <= 0:
+        raise ValueError("Giá trị giao dịch mô phỏng không hợp lệ")
+
+    portfolio_before = summarize_demo_trades(user_id)
+
+    if side_norm == "BUY":
+        debit_wallet_for_payment(user_id, gross_vnd, f"Mua BTC demo · {amount_btc:.8f} BTC", None)
+    else:
+        if _num(portfolio_before.get("position_btc")) + 1e-12 < amount_btc:
+            raise ValueError("Số dư BTC demo không đủ để thực hiện lệnh bán")
+        credit_wallet_balance(user_id, gross_vnd, f"Bán BTC demo · {amount_btc:.8f} BTC", None)
+
+    created = create_demo_trade({
+        "user_id": user_id,
+        "side": side_norm.lower(),
+        "amount_vnd": gross_vnd,
+        "amount_usdt": amount_btc,
+        "price_source": price_source,
+        "applied_price": _num(applied_price),
+    })
+    if not created:
+        return None
+
+    return {
+        **created,
+        "wallet": get_wallet_for_user(user_id),
+        "portfolio": summarize_demo_trades(user_id),
+    }
