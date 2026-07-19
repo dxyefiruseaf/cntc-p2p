@@ -10,17 +10,20 @@ class AskAIRequest(BaseModel):
 
 
 class AskAIResponse(BaseModel):
+    intent: str = "general"
+    uses_market_data: bool = False
+    data_quality: dict[str, Any] | None = None
     verdict: str
     confidence: int
     answer: str
-    reasons: list[str]
-    risks: list[str]
-    suggested_action: str
-    disclaimer: str
+    reasons: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    suggested_action: str = ""
+    disclaimer: str = ""
     created_at: str
     risk_score: int | None = None
     risk_level: str | None = None
-    risk_factors: list[dict[str, Any]] = []
+    risk_factors: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SeedRequest(BaseModel):
