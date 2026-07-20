@@ -1,7 +1,4 @@
 from typing import Any
-from copy import deepcopy
-from threading import RLock
-from time import monotonic
 
 from app.supabase_client import get_supabase
 
@@ -20,58 +17,19 @@ P2P_FIELDS = (
 )
 
 
-# Bộ nhớ đệm ngắn hạn ở backend giúp các trang dùng chung dữ liệu thị trường
-# không lặp lại nhiều truy vấn Supabase trong cùng một phút. Cache chỉ chứa
-# dữ liệu công khai, không chứa token hoặc dữ liệu tài khoản người dùng.
-_MARKET_CACHE: dict[str, tuple[float, Any]] = {}
-_MARKET_CACHE_LOCK = RLock()
-
-
-def _cache_get(key: str, ttl_seconds: float) -> Any | None:
-    with _MARKET_CACHE_LOCK:
-        cached = _MARKET_CACHE.get(key)
-        if not cached:
-            return None
-        created_at, value = cached
-        if monotonic() - created_at > ttl_seconds:
-            _MARKET_CACHE.pop(key, None)
-            return None
-        return deepcopy(value)
-
-
-def _cache_set(key: str, value: Any) -> Any:
-    with _MARKET_CACHE_LOCK:
-        _MARKET_CACHE[key] = (monotonic(), deepcopy(value))
-    return value
-
-
-def clear_market_cache() -> None:
-    with _MARKET_CACHE_LOCK:
-        _MARKET_CACHE.clear()
-
-
 def _client():
     return get_supabase()
 
 
 def get_latest_ohlcv() -> dict[str, Any] | None:
-    cached = _cache_get("ohlcv:latest", 25)
-    if cached is not None:
-        return cached
     sb = _client()
     if sb is None:
         return None
     res = sb.table(OHLCV_TABLE).select(OHLCV_FIELDS).order("timestamp", desc=True).limit(1).execute()
-    value = res.data[0] if res.data else None
-    return _cache_set("ohlcv:latest", value) if value else None
+    return res.data[0] if res.data else None
 
 
 def get_ohlcv(hours: int) -> list[dict[str, Any]]:
-    hours = max(1, min(int(hours), 8760))
-    cache_key = f"ohlcv:{hours}"
-    cached = _cache_get(cache_key, 75)
-    if cached is not None:
-        return cached
     sb = _client()
     if sb is None:
         return []
@@ -82,19 +40,10 @@ def get_ohlcv(hours: int) -> list[dict[str, Any]]:
         .limit(hours)
         .execute()
     )
-    rows = list(reversed(res.data or []))
-    if rows:
-        _cache_set(cache_key, rows)
-        _cache_set("ohlcv:latest", rows[-1])
-    return rows
+    return list(reversed(res.data or []))
 
 
 def get_p2p_spread(hours: int) -> list[dict[str, Any]]:
-    hours = max(1, min(int(hours), 8760))
-    cache_key = f"p2p:{hours}"
-    cached = _cache_get(cache_key, 75)
-    if cached is not None:
-        return cached
     sb = _client()
     if sb is None:
         return []
@@ -106,10 +55,7 @@ def get_p2p_spread(hours: int) -> list[dict[str, Any]]:
         .limit(hours * 2)
         .execute()
     )
-    rows = res.data or []
-    if rows:
-        _cache_set(cache_key, rows)
-    return rows
+    return res.data or []
 
 
 def insert_ai_history(row: dict[str, Any]) -> None:
@@ -476,15 +422,14 @@ def credit_wallet_balance(user_id: str, amount_vnd: int | float, description: st
     return {"wallet": get_wallet_for_user(user_id), "transaction": tx}
 
 
-def summarize_demo_trades(user_id: str, limit: int = 500, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def summarize_demo_trades(user_id: str, limit: int = 500) -> dict[str, Any]:
     """Summarise the virtual BTC portfolio from recorded demo trades.
 
     The legacy `amount_usdt` field is reused as the simulated BTC quantity in the
     trading-terminal UI. This keeps the database schema unchanged while still
     allowing a realistic wallet + portfolio flow for classroom demos.
     """
-    source_rows = rows if rows is not None else list_demo_trades(user_id, limit)
-    rows = list(reversed(source_rows))
+    rows = list(reversed(list_demo_trades(user_id, limit)))
     position_btc = 0.0
     cost_basis_vnd = 0.0
     realized_pnl_vnd = 0.0

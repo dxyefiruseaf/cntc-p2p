@@ -7,7 +7,6 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').
 // Nếu chưa cấu hình VITE_DATA_API_BASE_URL, toàn bộ request vẫn chạy qua API_BASE như cũ.
 const DATA_API_BASE = (import.meta.env.VITE_DATA_API_BASE_URL || API_BASE).replace(/\/+$/, '');
 const LIVE_NEWS_HIDDEN_KEY = 'btc_bigdata_live_news_hidden_v1';
-const API_CACHE_PREFIX = 'btc_api_cache_v4:';
 
 const DATA_ENDPOINT_PREFIXES = [
   '/api/latest',
@@ -139,6 +138,7 @@ function getCurrentRouteName() {
 }
 
 function route() {
+  document.querySelector('#tradeDetailModal [data-close-trade-detail]')?.click();
   disposeCharts();
   activeRoute = getCurrentRouteName();
   // Cho phép vào #set-password cả khi đã có mật khẩu để user có thể đổi mật khẩu.
@@ -228,18 +228,8 @@ function badge(signal) {
 
 function sourcePill(source) {
   const normalized = String(source || '').toLowerCase();
-  const isLive = ['api', 'rss', 'rss_cache', 'supabase', 'cache'].includes(normalized);
-  const label = normalized === 'rss'
-    ? '● RSS tin tức'
-    : normalized === 'rss_cache'
-      ? '● RSS cache'
-      : normalized === 'cache'
-        ? '● Cache nhanh'
-        : normalized === 'stale_cache'
-          ? '● Cache cũ'
-          : isLive
-            ? '● API thật'
-            : '● Demo fallback';
+  const isLive = ['api', 'rss', 'rss_cache', 'supabase'].includes(normalized);
+  const label = normalized === 'rss' ? '● RSS tin tức' : normalized === 'rss_cache' ? '● RSS cache' : isLive ? '● API thật' : '● Demo fallback';
   return `<span class="source-pill ${isLive ? 'api' : 'mock'}">${label}</span>`;
 }
 
@@ -341,17 +331,6 @@ function buildMockNews() {
 }
 
 function mockFor(endpoint) {
-  if (endpoint.startsWith('/api/overview')) {
-    const hours = Number(new URLSearchParams(endpoint.split('?')[1] || '').get('hours') || 24);
-    const latest = window.MOCK_DATA.latest || {};
-    const summary = window.MOCK_DATA.summary || {};
-    const ohlcv = normalizeOhlcv(hours);
-    const p2p = normalizeP2P(Math.min(hours, 24));
-    const comparison = buildMockP2PComparison();
-    const risk = buildMockRiskScore();
-    const alerts = buildMockMarketAlerts();
-    return { generated_at: new Date().toISOString(), latest, latest_source: 'mock', summary, ohlcv, ohlcv_source: 'mock', risk, alerts, p2p, p2p_source: 'mock', comparison: { sell: comparison.sell, buy: comparison.buy }, data_status: {} };
-  }
   if (endpoint.startsWith('/api/latest')) return window.MOCK_DATA.latest;
   if (endpoint.startsWith('/api/indicators/summary')) return window.MOCK_DATA.summary;
   if (endpoint.startsWith('/api/ohlcv')) {
@@ -368,22 +347,6 @@ function mockFor(endpoint) {
   if (endpoint.startsWith('/api/p2p-comparison')) return buildMockP2PComparison();
   if (endpoint.startsWith('/api/news/latest')) return buildMockNews();
   if (endpoint.startsWith('/api/ai/history')) return window.MOCK_DATA.aiHistory || { count: 0, data: [] };
-  if (endpoint.startsWith('/api/demo-trades/terminal')) {
-    const hours = Number(new URLSearchParams(endpoint.split('?')[1] || '').get('hours') || 168);
-    const ohlcv = normalizeOhlcv(hours);
-    const p2p = normalizeP2P(Math.min(hours, 24));
-    const latest = window.MOCK_DATA.latest || {};
-    return {
-      generated_at: new Date().toISOString(),
-      latest: { data: latest, source: 'mock' },
-      ohlcv: { data: ohlcv, source: 'mock' },
-      p2p: { data: p2p, source: 'mock' },
-      risk: { data: buildMockRiskScore() },
-      wallet: { wallet: { balance_vnd: 100000, balance_usdt_demo: 0 } },
-      trades: { count: 0, data: [], portfolio: { position_btc: 0, avg_entry_vnd: 0, realized_pnl_vnd: 0, trades_count: 0, buys: 0, sells: 0, total_buy_vnd: 0, total_sell_vnd: 0 } },
-      data_status: { latest_ohlcv_timestamp: latest.timestamp, is_ohlcv_fresh: false, is_p2p_fresh: false }
-    };
-  }
   if (endpoint.startsWith('/api/wallet/me')) return { wallet: { balance_vnd: 100000, balance_usdt_demo: 0 }, transactions: [], sandbox: true, disclaimer: 'Ví demo fallback khi backend chưa sẵn sàng.' };
   if (endpoint.startsWith('/api/payment/subscription')) {
     const raw = localStorage.getItem('btc_premium_subscription');
@@ -395,79 +358,11 @@ function mockFor(endpoint) {
   return null;
 }
 
-function apiCacheTtl(endpoint) {
-  if (endpoint.startsWith('/api/overview')) return 45_000;
-  if (endpoint.startsWith('/api/latest')) return 45_000;
-  if (endpoint.startsWith('/api/indicators/summary')) return 60_000;
-  if (endpoint.startsWith('/api/risk-score') || endpoint.startsWith('/api/market-alerts')) return 60_000;
-  if (endpoint.startsWith('/api/ohlcv')) return 180_000;
-  if (endpoint.startsWith('/api/p2p')) return 120_000;
-  if (endpoint.startsWith('/api/news')) return 300_000;
-  if (endpoint.startsWith('/api/data-')) return 90_000;
-  if (endpoint.startsWith('/api/demo-trades/terminal')) return 20_000;
-  if (endpoint.startsWith('/api/demo-trades') || endpoint.startsWith('/api/wallet/me')) return 15_000;
-  if (endpoint.startsWith('/api/ai/history')) return 30_000;
-  return 30_000;
-}
-
-function apiCacheKey(url) {
-  const userScope = currentSession?.user?.id || (currentSession?.access_token ? 'auth' : 'anon');
-  return `${API_CACHE_PREFIX}${userScope}:${url}`;
-}
-
-function readApiCache(key, maxAge = Infinity) {
-  try {
-    const raw = sessionStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    const age = Date.now() - Number(parsed.savedAt || 0);
-    if (!parsed.data || age > maxAge) return null;
-    return { data: parsed.data, age };
-  } catch (_) {
-    return null;
-  }
-}
-
-function writeApiCache(key, data) {
-  try {
-    const raw = JSON.stringify({ savedAt: Date.now(), data });
-    // Tránh làm đầy sessionStorage khi endpoint trả lịch sử quá lớn.
-    if (raw.length <= 1_500_000) sessionStorage.setItem(key, raw);
-  } catch (_) { }
-}
-
-function clearApiCache() {
-  try {
-    for (let i = sessionStorage.length - 1; i >= 0; i -= 1) {
-      const key = sessionStorage.key(i);
-      if (key?.startsWith(API_CACHE_PREFIX)) sessionStorage.removeItem(key);
-    }
-  } catch (_) { }
-  fetchJson._memoryCache?.clear();
-}
-
 async function fetchJson(endpoint, options = {}) {
   const method = String(options.method || 'GET').toUpperCase();
   const isGet = method === 'GET';
   const url = apiUrl(endpoint);
-  const requestKey = isGet ? `${url}|${currentSession?.user?.id || (currentSession?.access_token ? 'auth' : 'anon')}` : '';
-  const ttl = Number(options.cacheTtl ?? apiCacheTtl(endpoint));
-  const useCache = isGet && options.cache !== false;
-  const forceRefresh = options.forceRefresh === true;
-  const storageKey = apiCacheKey(url);
-
-  fetchJson._memoryCache ||= new Map();
-  if (useCache && !forceRefresh) {
-    const memory = fetchJson._memoryCache.get(requestKey);
-    if (memory && Date.now() - memory.savedAt <= ttl) {
-      return { data: memory.data, source: 'cache', cached: true };
-    }
-    const stored = readApiCache(storageKey, ttl);
-    if (stored) {
-      fetchJson._memoryCache.set(requestKey, { savedAt: Date.now() - stored.age, data: stored.data });
-      return { data: stored.data, source: 'cache', cached: true };
-    }
-  }
+  const requestKey = isGet ? `${url}|${currentSession?.access_token ? 'auth' : 'anon'}` : '';
 
   if (isGet) {
     fetchJson._inFlight ||= new Map();
@@ -476,7 +371,7 @@ async function fetchJson(endpoint, options = {}) {
 
   const requestPromise = (async () => {
     const controller = new AbortController();
-    const timeoutMs = Number(options.timeout ?? (isGet ? 12_000 : 20_000));
+    const timeoutMs = options.timeout ?? 30000;
     const timeout = timeoutMs > 0
       ? setTimeout(() => controller.abort(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs)
       : null;
@@ -485,9 +380,9 @@ async function fetchJson(endpoint, options = {}) {
         method,
         headers: { 'Content-Type': 'application/json', ...authHeader(), ...(options.headers || {}) },
         body: options.body ? JSON.stringify(options.body) : undefined,
-        signal: controller.signal,
-        keepalive: false
+        signal: controller.signal
       });
+      if (timeout) clearTimeout(timeout);
       if (!response.ok) {
         let detail = `HTTP ${response.status}`;
         try {
@@ -496,28 +391,13 @@ async function fetchJson(endpoint, options = {}) {
         } catch (_) { }
         throw new Error(detail);
       }
-      const data = await response.json();
-      if (useCache) {
-        fetchJson._memoryCache.set(requestKey, { savedAt: Date.now(), data });
-        writeApiCache(storageKey, data);
-      } else if (!isGet) {
-        clearApiCache();
-      }
-      return { data, source: 'api' };
+      return { data: await response.json(), source: 'api' };
     } catch (error) {
-      // Dùng dữ liệu cache cũ trước fallback demo để trang vẫn mở ngay khi
-      // Render cold-start hoặc Supabase phản hồi chậm.
-      if (useCache) {
-        const memory = fetchJson._memoryCache.get(requestKey);
-        if (memory?.data) return { data: memory.data, source: 'stale_cache', cached: true, error };
-        const stale = readApiCache(storageKey, 6 * 60 * 60 * 1000);
-        if (stale) return { data: stale.data, source: 'stale_cache', cached: true, error };
-      }
+      if (timeout) clearTimeout(timeout);
       const fallback = mockFor(endpoint);
       if (fallback) return { data: fallback, source: 'mock', error };
       throw error;
     } finally {
-      if (timeout) clearTimeout(timeout);
       if (isGet) fetchJson._inFlight?.delete(requestKey);
     }
   })();
@@ -891,56 +771,187 @@ async function runDemo(type) {
 
 async function renderDashboardPage() {
   app.innerHTML = `
-    <section class="page-head">
-      <div><span class="eyebrow">Dashboard minh chứng</span><h1>Thị trường Bitcoin trong 5 giây</h1><p class="lead">Dashboard này là sản phẩm mẫu của mô hình kinh doanh: người dùng thấy giá, tín hiệu tổng hợp, chỉ báo chi tiết và biểu đồ nhanh.</p></div>
-      <button class="btn primary" id="refreshDashboard">Làm mới dữ liệu</button>
+    <section class="page-head dashboard-page-head">
+      <div>
+        <span class="eyebrow">Tổng quan thị trường</span>
+        <h1>Dashboard Bitcoin trực quan</h1>
+        <p class="lead">Theo dõi giá, tín hiệu kỹ thuật, Risk Score và quy đổi BTC ↔ USD ↔ VNĐ trên cùng một màn hình.</p>
+      </div>
+      <div class="dashboard-head-actions">
+        <a class="btn secondary" href="#decision">Mở Decision Hub</a>
+        <button class="btn primary" id="refreshDashboard">Làm mới dữ liệu</button>
+      </div>
     </section>
-    <section id="dashboardContent" class="grid"><div class="grid three">${loadingCard(180)}${loadingCard(180)}${loadingCard(180)}</div>${loadingCard(300)}</section>
+    <section id="dashboardContent" class="dashboard-loading-shell">
+      <div class="grid three">${loadingCard(170)}${loadingCard(170)}${loadingCard(170)}</div>
+      ${loadingCard(480)}
+    </section>
   `;
   document.getElementById('refreshDashboard').addEventListener('click', renderDashboardPage);
   try {
-    // Một snapshot tổng hợp thay cho 5 request riêng. Khi backend host vừa
-    // cold-start, Dashboard chỉ phải chờ một request và có thể dùng cache cũ.
-    const overviewRes = await fetchJson('/api/overview?hours=24', { timeout: 14_000, cacheTtl: 45_000 });
-    const overview = overviewRes.data || {};
-    const latestRes = { data: overview.latest || {}, source: overview.latest_source || overviewRes.source };
-    const latest = latestRes.data;
-    const summary = overview.summary || {};
-    const ohlcv = overview.ohlcv || normalizeOhlcv(24);
-    const risk = overview.risk || buildMockRiskScore();
-    const alerts = overview.alerts?.data || [];
-    const change = latest.open ? ((latest.close - latest.open) / latest.open) * 100 : 0;
-    const verdict = summary.overall?.verdict || 'NEUTRAL';
+    const [latestRes, summaryRes, ohlcvRes, riskRes, alertsRes, p2pRes] = await Promise.all([
+      fetchJson('/api/latest'),
+      fetchJson('/api/indicators/summary'),
+      fetchJson('/api/ohlcv?hours=72'),
+      fetchJson('/api/risk-score'),
+      fetchJson('/api/market-alerts'),
+      fetchJson('/api/p2p-comparison')
+    ]);
+
+    const latest = latestRes.data || {};
+    const summary = summaryRes.data || {};
+    const ohlcv = ohlcvRes.data || {};
+    const rows = Array.isArray(ohlcv.data) ? ohlcv.data : [];
+    const risk = riskRes.data || {};
+    const alerts = alertsRes.data?.data || alertsRes.data || [];
+    const p2p = p2pRes.data || {};
     const signals = summary.signals || {};
+    const verdict = summary.overall?.verdict || 'NEUTRAL';
+    const firstClose = Number(rows[0]?.close || latest.open || latest.close || 0);
+    const btcUsd = Number(latest.close || rows.at(-1)?.close || 0);
+    const change24 = firstClose ? ((btcUsd - firstClose) / firstClose) * 100 : 0;
+    const buyRate = Number(p2p.buy?.p2p_price || p2p.buy?.market_price || p2p.sell?.market_price || 26000);
+    const sellRate = Number(p2p.sell?.p2p_price || p2p.sell?.market_price || p2p.buy?.market_price || 26000);
+    const btcBuyVnd = btcUsd * buyRate;
+    const btcSellVnd = btcUsd * sellRate;
+    const riskScore = Number(risk.score || 0);
+    const riskLabel = escapeHTML(risk.label_vi || risk.level || 'Chưa xác định');
+
     document.getElementById('dashboardContent').innerHTML = `
-      <div class="kpi-row">
-        <div class="stat-card"><span class="stat-label">BTC/USDT</span><strong class="stat-value">${formatUSD(latest.close)}</strong><div class="stat-note">${formatPct(change)} trong nến hiện tại · ${sourcePill(latestRes.source)}</div></div>
-        <div class="stat-card"><span class="stat-label">Khuyến nghị tổng hợp</span><strong class="stat-value">${badge(verdict)}</strong><div class="stat-note">${summary.overall?.buy || 0} MUA · ${summary.overall?.sell || 0} BÁN · ${summary.overall?.neutral || 0} TRUNG LẬP</div></div>
-        <div class="stat-card"><span class="stat-label">Risk Score</span><strong class="stat-value">${risk.score}/100</strong><div class="stat-note">${escapeHTML(risk.label_vi || risk.level)} · <a href="#risk">Xem cảnh báo</a></div></div>
-        <div class="stat-card"><span class="stat-label">Cập nhật</span><strong class="stat-value" style="font-size:1.7rem">${formatVNTime(latest.timestamp)}</strong><div class="stat-note">Hiển thị theo giờ Việt Nam UTC+7</div></div>
-        <div class="stat-card"><span class="stat-label">Volume</span><strong class="stat-value">${formatNumber(latest.volume, 2)}</strong><div class="stat-note">BTC · ${formatNumber(latest.trades, 0)} lệnh</div></div>
-      </div>
-      <div class="grid four section">
-        ${['RSI', 'MACD', 'Bollinger', 'EMA_Trend'].map(key => {
-      const s = signals[key] || { value: null, signal: 'NEUTRAL', note: 'Chưa có dữ liệu' };
-      return `<div class="card"><h3>${key.replace('_', ' ')}</h3><p>${badge(s.signal)}</p><p style="margin-top:10px">${escapeHTML(s.note)}</p><div class="meta">Giá trị: ${formatNumber(s.value, 2)}</div></div>`;
-    }).join('')}
-      </div>
-      <div class="grid two section">
-        <div class="card">
-          <div class="section-head"><div><h2>Biến động 24 giờ gần nhất</h2><p>Đường giá đóng cửa dùng để xem nhanh xu hướng trong ngày.</p></div><a class="btn secondary" href="#chart">Xem biểu đồ chi tiết</a></div>
-          <div id="miniChart" class="chart-box small"></div>
+      <section class="dashboard-market-overview">
+        <article class="dashboard-price-hero">
+          <div class="dashboard-price-topline">
+            <div><span class="dashboard-symbol">₿</span><span><strong>Bitcoin</strong><small>BTC/USDT · Spot</small></span></div>
+            <span class="dashboard-live-dot">Dữ liệu mới nhất</span>
+          </div>
+          <div class="dashboard-price-main">
+            <div>
+              <span>Giá hiện tại</span>
+              <strong>${formatUSD(btcUsd)}</strong>
+              <small class="${change24 >= 0 ? 'positive' : 'negative'}">${formatPct(change24)} trong 72 giờ</small>
+            </div>
+            <div class="dashboard-price-vnd">
+              <span>Mua qua P2P</span><strong>${formatVND(btcBuyVnd)}</strong>
+              <span>Bán qua P2P</span><strong>${formatVND(btcSellVnd)}</strong>
+            </div>
+          </div>
+          <div class="dashboard-price-footer">
+            <span>Cập nhật ${formatVNTime(latest.timestamp)}</span>
+            <span>${sourcePill(latestRes.source)} · P2P ${sourcePill(p2pRes.source)}</span>
+          </div>
+        </article>
+
+        <div class="dashboard-signal-stack">
+          <article class="dashboard-signal-card">
+            <span>Tín hiệu tổng hợp</span>
+            <strong>${badge(verdict)}</strong>
+            <small>${summary.overall?.buy || 0} MUA · ${summary.overall?.sell || 0} BÁN · ${summary.overall?.neutral || 0} TRUNG LẬP</small>
+          </article>
+          <article class="dashboard-signal-card">
+            <span>Risk Score</span>
+            <div class="dashboard-risk-line"><strong>${formatNumber(riskScore, 0)}/100</strong><span>${riskLabel}</span></div>
+            <div class="dashboard-risk-track"><i style="width:${Math.max(0, Math.min(100, riskScore))}%"></i></div>
+          </article>
+          <article class="dashboard-signal-card compact-action-card">
+            <span>Hành động nhanh</span>
+            <div><a href="#decision">Lập kế hoạch</a><a href="#trade">Giao dịch demo</a><a href="#risk">Xem rủi ro</a></div>
+          </article>
         </div>
-        <div class="card">
-          <div class="section-head"><div><h2>Cảnh báo nhanh</h2><p>Rule-based alerts giúp người dùng không cần tự đọc toàn bộ bảng chỉ báo.</p></div><a class="btn secondary" href="#risk">Chi tiết</a></div>
-          ${marketAlertsHTML(alerts.slice(0, 4))}
-        </div>
-      </div>
+      </section>
+
+      <section class="dashboard-kpi-strip">
+        <div><span>RSI 14</span><strong>${formatNumber(latest.rsi_14, 2)}</strong><small>${escapeHTML(signals.RSI?.note || 'Động lượng thị trường')}</small></div>
+        <div><span>MACD</span><strong>${formatNumber(latest.macd, 2)}</strong><small>${escapeHTML(signals.MACD?.note || 'Xu hướng ngắn hạn')}</small></div>
+        <div><span>EMA 20 / 50</span><strong>${formatNumber(latest.ema_20, 0)} / ${formatNumber(latest.ema_50, 0)}</strong><small>${badge(signals.EMA_Trend?.signal || 'NEUTRAL')}</small></div>
+        <div><span>Khối lượng</span><strong>${formatNumber(latest.volume, 2)} BTC</strong><small>${formatNumber(latest.trades, 0)} giao dịch</small></div>
+      </section>
+
+      <section class="dashboard-workspace-grid">
+        <article class="card dashboard-technical-card">
+          <div class="section-head dashboard-section-head">
+            <div><span class="dashboard-section-kicker">Phân tích kỹ thuật</span><h2>Biểu đồ nến, EMA và RSI</h2><p>72 giờ gần nhất, hỗ trợ zoom trực tiếp trên biểu đồ.</p></div>
+            <a class="btn secondary small" href="#chart">Mở biểu đồ đầy đủ</a>
+          </div>
+          <div id="dashboardTechnicalChart" class="chart-box dashboard-technical-chart"></div>
+        </article>
+
+        <article class="card dashboard-converter-card">
+          <div class="dashboard-card-title">
+            <span class="dashboard-section-kicker">Quy đổi nhanh</span>
+            <h2>BTC ↔ USD ↔ VNĐ</h2>
+            <p>Dùng giá BTC hiện tại và tỷ giá P2P theo chiều mua/bán.</p>
+          </div>
+          <div class="dashboard-converter-form">
+            <label>Số tiền<input id="dashboardConvertAmount" type="number" min="0" step="0.00000001" value="0.01"></label>
+            <label>Đơn vị<select id="dashboardConvertUnit"><option value="btc">BTC</option><option value="usd">USD/USDT</option><option value="vnd">VNĐ</option></select></label>
+            <label>Chiều P2P<select id="dashboardConvertSide"><option value="buy">Mua BTC</option><option value="sell">Bán BTC</option></select></label>
+          </div>
+          <div id="dashboardConvertResult" class="dashboard-converter-result"></div>
+          <div class="dashboard-rate-note"><span>P2P BUY <strong>${formatVND(buyRate)}</strong></span><span>P2P SELL <strong>${formatVND(sellRate)}</strong></span></div>
+        </article>
+      </section>
+
+      <section class="dashboard-bottom-grid">
+        <article class="card dashboard-indicator-card">
+          <div class="section-head dashboard-section-head"><div><span class="dashboard-section-kicker">Chỉ báo</span><h2>Trạng thái kỹ thuật</h2></div><a class="btn secondary small" href="#guide">Cách đọc</a></div>
+          <div class="dashboard-indicator-grid">
+            ${['RSI', 'MACD', 'Bollinger', 'EMA_Trend'].map(key => {
+              const s = signals[key] || { value: null, signal: 'NEUTRAL', note: 'Chưa có dữ liệu' };
+              return `<div><span>${key.replace('_', ' ')}</span><strong>${badge(s.signal)}</strong><p>${escapeHTML(s.note)}</p><small>Giá trị ${formatNumber(s.value, 2)}</small></div>`;
+            }).join('')}
+          </div>
+        </article>
+        <article class="card dashboard-alert-card">
+          <div class="section-head dashboard-section-head"><div><span class="dashboard-section-kicker">Theo dõi rủi ro</span><h2>Cảnh báo nhanh</h2></div><a class="btn secondary small" href="#risk">Chi tiết</a></div>
+          ${marketAlertsHTML((Array.isArray(alerts) ? alerts : []).slice(0, 4))}
+        </article>
+      </section>
     `;
-    drawLineChart('miniChart', ohlcv.data || [], 'close', 'Giá đóng cửa BTC/USDT');
+
+    drawTechnicalChart('dashboardTechnicalChart', rows);
+    bindDashboardConverter({ btcUsd, buyRate, sellRate });
   } catch (error) {
     document.getElementById('dashboardContent').innerHTML = errorBox(error.message);
   }
+}
+
+function bindDashboardConverter({ btcUsd, buyRate, sellRate }) {
+  const amountEl = document.getElementById('dashboardConvertAmount');
+  const unitEl = document.getElementById('dashboardConvertUnit');
+  const sideEl = document.getElementById('dashboardConvertSide');
+  const resultEl = document.getElementById('dashboardConvertResult');
+  if (!amountEl || !unitEl || !sideEl || !resultEl) return;
+
+  const update = () => {
+    const amount = Math.max(0, Number(amountEl.value || 0));
+    const rate = sideEl.value === 'sell' ? sellRate : buyRate;
+    let btc = 0;
+    let usd = 0;
+    let vnd = 0;
+    if (unitEl.value === 'btc') {
+      btc = amount;
+      usd = btc * btcUsd;
+      vnd = usd * rate;
+    } else if (unitEl.value === 'usd') {
+      usd = amount;
+      btc = btcUsd ? usd / btcUsd : 0;
+      vnd = usd * rate;
+    } else {
+      vnd = amount;
+      usd = rate ? vnd / rate : 0;
+      btc = btcUsd ? usd / btcUsd : 0;
+    }
+    resultEl.innerHTML = `
+      <div><span>Bitcoin</span><strong>${formatBTC(btc, 8)}</strong></div>
+      <div><span>USD/USDT</span><strong>${formatUSD(usd)}</strong></div>
+      <div class="total"><span>Giá trị VNĐ</span><strong>${formatVND(vnd)}</strong><small>${sideEl.value === 'sell' ? 'Ước tính thực nhận trước phí' : 'Ước tính chi phí trước phí'}</small></div>`;
+  };
+
+  [amountEl, unitEl, sideEl].forEach(el => {
+    el.addEventListener('input', update);
+    el.addEventListener('change', update);
+  });
+  update();
 }
 
 async function renderChartPage() {
@@ -1419,18 +1430,24 @@ async function askAI(question) {
 
 
 async function renderHistoryPage() {
+  const params = new URLSearchParams((location.hash.split('?')[1] || ''));
+  const requestedTab = params.get('tab') === 'trades' ? 'trades' : 'ai';
+
   app.innerHTML = `
-    <section class="page-head"><div><span class="eyebrow">Lịch sử theo tài khoản</span><h1>Lịch sử AI và sàn giao dịch ảo</h1><p class="lead">Trang này yêu cầu đăng nhập. Lịch sử được đọc từ Supabase theo access token, không còn phụ thuộc localStorage.</p></div></section>
-    <section class="card">
-      <div class="segmented" id="historyTabs"><button data-tab="ai" class="active">Lịch sử AI</button><button data-tab="trades">Lịch sử sàn ảo</button></div>
+    <section class="page-head"><div><span class="eyebrow">Lịch sử theo tài khoản</span><h1>Lịch sử AI và giao dịch BTC demo</h1><p class="lead">Dữ liệu được đọc từ Supabase theo tài khoản. Chọn từng giao dịch để xem đầy đủ giá khớp, số lượng, tổng tiền, nguồn giá và biến động ví demo.</p></div></section>
+    <section class="card history-page-card">
+      <div class="segmented" id="historyTabs"><button data-tab="ai" class="${requestedTab === 'ai' ? 'active' : ''}">Lịch sử AI</button><button data-tab="trades" class="${requestedTab === 'trades' ? 'active' : ''}">Lịch sử giao dịch</button></div>
       <div id="historyContent" style="margin-top:16px">${loadingCard(360)}</div>
     </section>
   `;
   document.querySelectorAll('#historyTabs button').forEach(btn => btn.addEventListener('click', () => {
     document.querySelectorAll('#historyTabs button').forEach(b => b.classList.toggle('active', b === btn));
+    window.history.replaceState(null, '', `#history?tab=${btn.dataset.tab}`);
     if (btn.dataset.tab === 'ai') loadAccountAIHistory(); else loadAccountTradeHistory();
   }));
-  await loadAccountAIHistory();
+
+  if (requestedTab === 'trades') await loadAccountTradeHistory();
+  else await loadAccountAIHistory();
 }
 
 async function loadAccountAIHistory() {
@@ -1455,7 +1472,18 @@ async function loadAccountTradeHistory() {
   try {
     const res = await fetchJson('/api/demo-trades?limit=50');
     const rows = res.data.data || [];
-    box.innerHTML = rows.length ? `<div class="trade-history">${rows.map(tradeRowHTML).join('')}</div>` : `<div class="state-box empty">Chưa có lệnh giao dịch trên sàn ảo.</div>`;
+    const portfolio = res.data.portfolio || {};
+    box.innerHTML = rows.length ? `
+      <div class="trade-history-summary" aria-label="Tổng quan lịch sử giao dịch">
+        <div><span>Tổng giao dịch</span><strong>${formatNumber(portfolio.trades_count ?? rows.length, 0)}</strong></div>
+        <div><span>Tổng tiền mua</span><strong>${formatVND(portfolio.total_buy_vnd || 0)}</strong></div>
+        <div><span>Tổng tiền bán</span><strong>${formatVND(portfolio.total_sell_vnd || 0)}</strong></div>
+        <div><span>BTC đang nắm giữ</span><strong>${formatNumber(portfolio.position_btc || 0, 8)} BTC</strong></div>
+      </div>
+      <div class="trade-history-hint"><span>Chọn một giao dịch bên dưới để xem chi tiết mua hoặc bán.</span><span>${rows.length} giao dịch gần nhất</span></div>
+      <div class="trade-history">${rows.map(tradeRowHTML).join('')}</div>
+    ` : `<div class="state-box empty">Chưa có lệnh giao dịch trên sàn ảo.</div>`;
+    bindTradeHistoryDetails(box);
   } catch (error) { box.innerHTML = errorBox(error.message); }
 }
 
@@ -1484,15 +1512,18 @@ function setSmartAlerts(rows) {
 }
 
 async function getDecisionMarketContext() {
-  const overviewRes = await fetchJson('/api/overview?hours=24', { timeout: 14_000, cacheTtl: 45_000 });
-  const overview = overviewRes.data || {};
-  const latest = overview.latest || {};
-  const risk = overview.risk || buildMockRiskScore();
-  const p2p = overview.comparison || buildMockP2PComparison();
+  const [latestRes, riskRes, p2pRes] = await Promise.all([
+    fetchJson('/api/latest', { timeout: 9000 }),
+    fetchJson('/api/risk-score', { timeout: 9000 }),
+    fetchJson('/api/p2p-comparison', { timeout: 9000 })
+  ]);
+  const latest = latestRes.data || {};
+  const risk = riskRes.data || buildMockRiskScore();
+  const p2p = p2pRes.data || buildMockP2PComparison();
   const buyPrice = Number(p2p.buy?.p2p_price || p2p.buy?.market_price || p2p.sell?.market_price || 26000);
   const sellPrice = Number(p2p.sell?.p2p_price || p2p.sell?.market_price || p2p.buy?.market_price || 26000);
   const btcUsd = Number(latest.close || risk.price || window.MOCK_DATA?.latest?.close || 0);
-  return { latest, risk, p2p, buyPrice, sellPrice, btcUsd, source: overviewRes.source };
+  return { latest, risk, p2p, buyPrice, sellPrice, btcUsd, source: [latestRes.source, riskRes.source, p2pRes.source].join('/') };
 }
 
 function riskTone(score) {
@@ -1503,103 +1534,15 @@ function riskTone(score) {
 }
 
 function renderDecisionHubPage() {
+  // platform-enhance.js dựng Decision Hub trực quan sau khi route được xác thực.
+  // Chỉ hiển thị skeleton ở đây để tránh render giao diện cũ và gọi API hai lần.
   app.innerHTML = `
-    <section class="page-head decision-page-head decision-hero-pro">
-      <div>
-        <span class="eyebrow">Decision Hub · Đăng nhập bắt buộc</span>
-        <h1>Trung tâm hỗ trợ quyết định Bitcoin</h1>
-        <p class="lead">Bộ công cụ dành cho tài khoản đã đăng nhập: lập kế hoạch mua/bán, theo dõi danh mục demo, cảnh báo thông minh, tính thực nhận VNĐ và AI giải thích giao dịch.</p>
-        <div class="decision-hero-tags"><span>Không đặt lệnh thật</span><span>Dữ liệu tham khảo</span><span>Lưu cục bộ theo trình duyệt</span></div>
-      </div>
-      <div class="decision-hero-panel">
-        <strong>Quy trình sử dụng</strong>
-        <ol>
-          <li>Kiểm tra Risk Score và giá P2P.</li>
-          <li>Lập kế hoạch mua/bán phù hợp vốn.</li>
-          <li>Lưu lệnh từ sàn giao dịch ảo để theo dõi PnL.</li>
-          <li>Đặt cảnh báo và nhờ AI giải thích.</li>
-        </ol>
-      </div>
+    <section class="page-head" data-decision-bootstrap>
+      <div><span class="eyebrow">Decision Hub</span><h1>Đang mở trung tâm quyết định</h1><p class="lead">Đang chuẩn bị biểu đồ kỹ thuật, dữ liệu P2P và các công cụ mô phỏng...</p></div>
     </section>
-
-    <section class="decision-feature-grid pro">
-      <article class="decision-feature-card"><span>🧭</span><strong>Buy/Sell Plan</strong><p>Lập kế hoạch theo vốn, P2P, Risk Score và khẩu vị rủi ro.</p></article>
-      <article class="decision-feature-card"><span>💼</span><strong>Portfolio PnL</strong><p>Theo dõi BTC demo, giá vốn trung bình và lời/lỗ tạm tính.</p></article>
-      <article class="decision-feature-card"><span>🔔</span><strong>Smart Alerts</strong><p>Cảnh báo giá, RSI, Risk Score và P2P spread theo ngưỡng.</p></article>
-      <article class="decision-feature-card"><span>💸</span><strong>Real VNĐ</strong><p>Ước tính số tiền nhận/mua theo BTC và P2P USDT/VNĐ.</p></article>
-      <article class="decision-feature-card"><span>🤖</span><strong>AI Explanation</strong><p>AI tóm tắt bối cảnh, rủi ro và kế hoạch tham khảo.</p></article>
-    </section>
-
-    <section class="decision-layout">
-      <article class="card decision-card decision-card-large" id="buySellPlanCard">
-        <div class="decision-card-head"><span class="step-badge">1</span><div><h3>Buy/Sell Plan Builder</h3><p>Lập kế hoạch trước khi vào lệnh. Công cụ chỉ mô phỏng, không gửi lệnh thật.</p></div></div>
-        <div class="decision-form-grid plan-grid">
-          <div class="field"><label>Hành động</label><select id="planAction"><option value="buy">Mua BTC</option><option value="sell">Bán BTC</option><option value="observe">Quan sát thêm</option></select></div>
-          <div class="field"><label>Vốn/Số lượng</label><input id="planAmount" type="number" min="0" step="0.00000001" value="5000000"></div>
-          <div class="field"><label>Đơn vị</label><select id="planUnit"><option value="vnd">VNĐ</option><option value="btc">BTC</option></select></div>
-          <div class="field"><label>Khẩu vị rủi ro</label><select id="planProfile"><option value="safe">An toàn</option><option value="moderate" selected>Trung bình</option><option value="aggressive">Rủi ro cao</option></select></div>
-        </div>
-        <button id="planBuildBtn" class="btn primary full">Tạo kế hoạch tham khảo</button>
-        <div id="planResult" class="decision-result compact"></div>
-      </article>
-
-      <article class="card decision-card decision-card-large" id="portfolioCard">
-        <div class="decision-card-head"><span class="step-badge blue">2</span><div><h3>Portfolio PnL Tracker</h3><p>Danh mục demo lưu trong trình duyệt để theo dõi giá vốn/lời lỗ. Đăng nhập giúp tính năng nằm trong khu vực tài khoản.</p></div></div>
-        <div id="portfolioSummary" class="decision-result compact">${loadingCard(110)}</div>
-        <div class="decision-form-grid portfolio-grid">
-          <div class="field"><label>Loại giao dịch</label><select id="portfolioSide"><option value="BUY">Mua BTC</option><option value="SELL">Bán BTC</option></select></div>
-          <div class="field"><label>Số tiền VNĐ</label><input id="portfolioVnd" type="number" min="0" value="1000000"></div>
-          <div class="field"><label>Ghi chú</label><input id="portfolioNote" type="text" placeholder="VD: DCA tuần 1"></div>
-        </div>
-        <div class="hero-actions"><button id="portfolioAddBtn" class="btn primary">Thêm giao dịch demo</button><button id="portfolioClearBtn" class="btn secondary">Xóa danh mục</button></div>
-        <div id="portfolioList" class="trade-history decision-list"></div>
-      </article>
-
-      <article class="card decision-card" id="smartAlertCard">
-        <div class="decision-card-head"><span class="step-badge amber">3</span><div><h3>Smart Alert Center</h3><p>Cảnh báo cục bộ theo dữ liệu hiện tại. Nếu cần email tự động, dùng trang Cảnh báo Email.</p></div></div>
-        <div class="decision-form-grid alert-grid">
-          <div class="field"><label>Metric</label><select id="smartMetric"><option value="price">BTC/USDT</option><option value="rsi">RSI</option><option value="risk">Risk Score</option><option value="p2p_sell">P2P SELL</option><option value="p2p_buy">P2P BUY</option></select></div>
-          <div class="field"><label>Điều kiện</label><select id="smartOperator"><option value="gt">Lớn hơn</option><option value="lt">Nhỏ hơn</option></select></div>
-          <div class="field"><label>Ngưỡng</label><input id="smartThreshold" type="number" step="0.01" placeholder="VD: 65000, 70"></div>
-        </div>
-        <div class="hero-actions"><button id="smartAddBtn" class="btn primary">Thêm cảnh báo</button><button id="smartCheckBtn" class="btn secondary">Kiểm tra ngay</button><a class="btn secondary" href="#alerts">Cảnh báo Email</a></div>
-        <div id="smartAlertList" class="decision-result compact"></div>
-      </article>
-
-      <article class="card decision-card" id="realVndCard">
-        <div class="decision-card-head"><span class="step-badge green">4</span><div><h3>Real VNĐ Received Calculator</h3><p>Tính nhanh số VNĐ ước tính khi bán BTC hoặc chi phí khi mua BTC qua P2P.</p></div></div>
-        <div class="decision-form-grid real-grid">
-          <div class="field"><label>Chiều</label><select id="realSide"><option value="sell">Bán BTC lấy VNĐ</option><option value="buy">Mua BTC bằng VNĐ</option></select></div>
-          <div class="field"><label>Số BTC</label><input id="realBtc" type="number" min="0" step="0.00000001" value="0.01"></div>
-          <div class="field"><label>Phí ước tính (%)</label><input id="realFee" type="number" min="0" step="0.01" value="0"></div>
-          <div class="field"><label>Thuế tham khảo (%)</label><input id="realTax" type="number" min="0" step="0.01" value="0.1"></div>
-        </div>
-        <button id="realCalcBtn" class="btn primary full">Tính VNĐ thực tế</button>
-        <div id="realVndResult" class="decision-result compact"></div>
-      </article>
-    </section>
-
-    <section class="card decision-card decision-ai-card" id="aiTradeExplanationCard">
-      <div class="decision-card-head"><span class="step-badge dark">5</span><div><h3>AI Trade Explanation</h3><p>AI giải thích dữ liệu theo cấu trúc rõ ràng, không đưa cam kết lợi nhuận hoặc lệnh mua/bán tuyệt đối.</p></div></div>
-      <div class="field"><label>Tình huống cần giải thích</label><textarea id="aiExplainInput" rows="4">Tôi muốn mua BTC bằng 5.000.000 VNĐ hôm nay. Hãy phân tích Risk Score, RSI/MACD, P2P spread và đề xuất kế hoạch tham khảo.</textarea></div>
-      <button id="aiExplainBtn" class="btn primary">AI giải thích kế hoạch</button>
-      <div id="aiExplainResult" class="ai-explain-result decision-result compact"></div>
-    </section>
-
-    <section class="state-box empty decision-disclaimer">
-      Các tính năng trên chỉ hỗ trợ học tập và mô phỏng quyết định. Hệ thống không đặt lệnh thật, không lưu private key, không cam kết lợi nhuận và không thay thế tư vấn tài chính/thuế chuyên nghiệp.
-    </section>
-  `;
-
-  document.getElementById('planBuildBtn')?.addEventListener('click', buildBuySellPlan);
-  document.getElementById('portfolioAddBtn')?.addEventListener('click', addPortfolioTrade);
-  document.getElementById('portfolioClearBtn')?.addEventListener('click', clearPortfolioTrades);
-  document.getElementById('smartAddBtn')?.addEventListener('click', addSmartAlert);
-  document.getElementById('smartCheckBtn')?.addEventListener('click', evaluateSmartAlerts);
-  document.getElementById('realCalcBtn')?.addEventListener('click', calculateRealVND);
-  document.getElementById('aiExplainBtn')?.addEventListener('click', explainTradeWithAI);
-  refreshDecisionPortfolio();
-  renderSmartAlerts();
+    <section class="decision-cockpit-shell">
+      <div class="decision-cockpit-grid">${Array.from({ length: 4 }, () => '<div class="decision-cockpit-card decision-cockpit-skeleton"></div>').join('')}</div>
+    </section>`;
 }
 
 async function buildBuySellPlan() {
@@ -1812,20 +1755,14 @@ async function loadTradeTerminal() {
   root.innerHTML = loadingCard(860);
 
   try {
-    // Một request tổng hợp thay cho 6 request song song. Điều này đặc biệt
-    // quan trọng khi backend Render vừa cold-start: chỉ một kết nối phải chờ
-    // và một thành phần chậm không còn làm toàn bộ terminal timeout.
-    const terminalRes = await fetchJson(
-      `/api/demo-trades/terminal?hours=${tradeTerminalHours}&limit=20`,
-      { timeout: 16_000, cacheTtl: 20_000 }
-    );
-    const snapshot = terminalRes.data || {};
-    const latestRes = { data: snapshot.latest?.data || {}, source: snapshot.latest?.source || terminalRes.source };
-    const ohlcvRes = { data: snapshot.ohlcv?.data || normalizeOhlcv(tradeTerminalHours), source: snapshot.ohlcv?.source || terminalRes.source };
-    const p2pRes = { data: snapshot.p2p?.data || normalizeP2P(24), source: snapshot.p2p?.source || terminalRes.source };
-    const riskRes = { data: snapshot.risk?.data || buildMockRiskScore(), source: terminalRes.source };
-    const walletRes = { data: snapshot.wallet || { wallet: {} }, source: terminalRes.source };
-    const tradesRes = { data: snapshot.trades || { data: [], portfolio: {} }, source: terminalRes.source };
+    const [latestRes, ohlcvRes, p2pRes, riskRes, walletRes, tradesRes] = await Promise.all([
+      fetchJson('/api/latest'),
+      fetchJson(`/api/ohlcv?hours=${tradeTerminalHours}`),
+      fetchJson(`/api/p2p-spread?hours=${tradeTerminalHours}`, { timeout: 30000 }),
+      fetchJson('/api/risk-score'),
+      fetchJson('/api/wallet/me'),
+      fetchJson('/api/demo-trades?limit=50')
+    ]);
 
     const latest = latestRes.data || {};
     const ohlcv = ohlcvRes.data || {};
@@ -1931,7 +1868,7 @@ async function loadTradeTerminal() {
               </div>
               <div class="hero-actions" style="margin-top:14px">
                 <a class="btn primary full" href="#wallet">Nạp tiền demo</a>
-                <a class="btn secondary full" href="#history">Xem lịch sử</a>
+                <a class="btn secondary full" href="#history?tab=trades">Xem lịch sử giao dịch</a>
               </div>
               <div class="wallet-safe-note">Ví demo phục vụ học phần, không phát sinh tiền thật. Lệnh BUY dùng số dư ví VND; lệnh SELL chỉ cho phép khi bạn đang nắm giữ đủ BTC mô phỏng.</div>
             </div>
@@ -2006,6 +1943,7 @@ async function loadTradeTerminal() {
     document.getElementById('tradeExecuteBtn')?.addEventListener('click', executeTradeOrder);
 
     drawTradeTerminalChart('tradeAdvancedChart', ohlcv.data || []);
+    bindTradeHistoryDetails(document.getElementById('tradeHistory'));
   } catch (error) {
     root.innerHTML = errorBox(error.message);
   }
@@ -2167,24 +2105,160 @@ async function renderAccountTradePreview() {
     const res = await fetchJson('/api/demo-trades?limit=5');
     const rows = res.data.data || [];
     el.innerHTML = rows.length ? rows.map(tradeRowHTML).join('') : `<div class="state-box empty">Chưa có giao dịch mô phỏng.</div>`;
+    bindTradeHistoryDetails(el);
   } catch (error) { el.innerHTML = errorBox(error.message); }
+}
+
+function encodeTradePayload(value) {
+  try { return encodeURIComponent(JSON.stringify(value || {})); }
+  catch (_) { return ''; }
 }
 
 function tradeRowHTML(o) {
   const side = String(o.side || '').toUpperCase();
-  const applied = Number(o.applied_price || 0);
+  const isBuy = side === 'BUY';
+  const amountBtc = Number(o.amount_usdt || o.usdt || 0);
+  const amountVnd = Number(o.amount_vnd || o.amount || 0);
+  const applied = Number(o.applied_price || 0) || (amountBtc > 0 ? amountVnd / amountBtc : 0);
+  const sourceLabel = String(o.price_source || 'p2p').toLowerCase() === 'market' ? 'Thị trường' : 'P2P';
+  const payload = escapeHTML(encodeTradePayload(o));
   return `
-    <div class="order-row trade-order-row ${side === 'BUY' ? 'buy' : 'sell'}">
-      <div>
-        <strong>${side === 'BUY' ? 'BUY BTC' : 'SELL BTC'}</strong>
-        <div class="meta">${formatVNTime(o.created_at || o.createdAt)} · ${escapeHTML(String(o.price_source || 'p2p').toUpperCase())}</div>
+    <div class="order-row trade-order-row trade-history-trigger ${isBuy ? 'buy' : 'sell'}" role="button" tabindex="0" aria-label="Xem chi tiết lệnh ${isBuy ? 'mua' : 'bán'} BTC" data-trade-payload="${payload}">
+      <div class="trade-row-main">
+        <span class="trade-direction-icon" aria-hidden="true">${isBuy ? '↗' : '↘'}</span>
+        <div class="trade-row-copy">
+          <strong>${isBuy ? 'MUA BTC' : 'BÁN BTC'}</strong>
+          <div class="meta">${formatVNTime(o.created_at || o.createdAt)} · ${escapeHTML(sourceLabel)}</div>
+        </div>
       </div>
-      <div style="text-align:right">
-        <strong>${formatNumber(Number(o.amount_usdt || o.usdt || 0), 8)} BTC</strong>
-        <div class="meta">${formatVND(o.amount_vnd || o.amount || 0)} · ${applied ? `${formatVND(applied)}/BTC` : 'Giá mô phỏng'}</div>
+      <div class="trade-row-value">
+        <strong>${formatNumber(amountBtc, 8)} BTC</strong>
+        <div class="meta">${formatVND(amountVnd)} · ${applied ? `${formatVND(applied)}/BTC` : 'Giá mô phỏng'}</div>
       </div>
+      <div class="trade-row-action"><span>Chi tiết</span><b aria-hidden="true">›</b></div>
     </div>
   `;
+}
+
+function bindTradeHistoryDetails(root = document) {
+  const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
+  scope.querySelectorAll('.trade-history-trigger[data-trade-payload]').forEach(row => {
+    if (row.dataset.tradeDetailBound === 'true') return;
+    row.dataset.tradeDetailBound = 'true';
+    const openDetail = () => {
+      try {
+        const trade = JSON.parse(decodeURIComponent(row.dataset.tradePayload || ''));
+        showTradeDetailModal(trade);
+      } catch (_) {
+        showToast('Không đọc được chi tiết giao dịch này.');
+      }
+    };
+    row.addEventListener('click', openDetail);
+    row.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openDetail();
+      }
+    });
+  });
+}
+
+function showTradeDetailModal(trade) {
+  document.getElementById('tradeDetailModal')?.remove();
+
+  const side = String(trade.side || '').toUpperCase();
+  const isBuy = side === 'BUY';
+  const amountBtc = Number(trade.amount_usdt || trade.usdt || 0);
+  const amountVnd = Number(trade.amount_vnd || trade.amount || 0);
+  const feeVnd = Number(trade.fee_vnd || trade.fee || 0);
+  const appliedPrice = Number(trade.applied_price || 0) || (amountBtc > 0 ? amountVnd / amountBtc : 0);
+  const source = String(trade.price_source || 'p2p').toLowerCase();
+  const sourceLabel = source === 'market' ? 'Giá thị trường quốc tế quy đổi' : 'Giá P2P USDT/VNĐ';
+  const createdAt = trade.created_at || trade.createdAt;
+  const tradeId = String(trade.id || trade.trade_id || 'Giao dịch demo');
+  const walletImpact = isBuy ? -(amountVnd + feeVnd) : amountVnd - feeVnd;
+  const statusRaw = String(trade.status || 'filled').toLowerCase();
+  const statusLabel = ['failed', 'cancelled', 'canceled'].includes(statusRaw) ? 'Không thành công' : statusRaw === 'pending' ? 'Đang xử lý' : 'Đã khớp';
+  const statusClass = statusLabel === 'Đã khớp' ? 'success' : statusLabel === 'Đang xử lý' ? 'pending' : 'failed';
+  const shortId = tradeId.length > 24 ? `${tradeId.slice(0, 10)}…${tradeId.slice(-8)}` : tradeId;
+
+  const modal = document.createElement('div');
+  modal.id = 'tradeDetailModal';
+  modal.className = 'trade-detail-modal';
+  modal.innerHTML = `
+    <div class="trade-detail-backdrop" data-close-trade-detail></div>
+    <section class="trade-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="tradeDetailTitle">
+      <header class="trade-detail-header ${isBuy ? 'buy' : 'sell'}">
+        <div class="trade-detail-title-wrap">
+          <span class="trade-detail-icon" aria-hidden="true">${isBuy ? '↗' : '↘'}</span>
+          <div>
+            <span class="eyebrow">Chi tiết giao dịch BTC demo</span>
+            <h2 id="tradeDetailTitle">${isBuy ? 'Lệnh mua BTC' : 'Lệnh bán BTC'}</h2>
+            <p>${createdAt ? formatVNTime(createdAt) : 'Không có thời gian giao dịch'}</p>
+          </div>
+        </div>
+        <button type="button" class="trade-detail-close" data-close-trade-detail aria-label="Đóng chi tiết giao dịch">×</button>
+      </header>
+
+      <div class="trade-detail-body">
+        <div class="trade-detail-status-line">
+          <span class="trade-detail-status ${statusClass}">${escapeHTML(statusLabel)}</span>
+          <span>Nguồn giá: <b>${escapeHTML(sourceLabel)}</b></span>
+        </div>
+
+        <div class="trade-detail-hero-value">
+          <span>${isBuy ? 'Tổng tiền đã dùng' : 'Tổng tiền nhận về'}</span>
+          <strong>${formatVND(amountVnd)}</strong>
+          <small>${isBuy ? 'Ví demo bị trừ tiền để nhận BTC mô phỏng.' : 'Ví demo được cộng tiền sau khi bán BTC mô phỏng.'}</small>
+        </div>
+
+        <div class="trade-detail-grid">
+          <div><span>Khối lượng BTC</span><strong>${formatNumber(amountBtc, 8)} BTC</strong></div>
+          <div><span>Giá khớp mỗi BTC</span><strong>${appliedPrice ? formatVND(appliedPrice) : '—'}</strong></div>
+          <div><span>Giá trị giao dịch</span><strong>${formatVND(amountVnd)}</strong></div>
+          <div><span>Phí giao dịch demo</span><strong>${formatVND(feeVnd)}</strong></div>
+          <div><span>Biến động ví</span><strong class="${walletImpact >= 0 ? 'positive' : 'negative'}">${walletImpact >= 0 ? '+' : '−'}${formatVND(Math.abs(walletImpact))}</strong></div>
+          <div><span>Loại lệnh</span><strong>${isBuy ? 'Mua theo giá hiện tại' : 'Bán theo giá hiện tại'}</strong></div>
+        </div>
+
+        <div class="trade-detail-note ${isBuy ? 'buy' : 'sell'}">
+          <strong>${isBuy ? 'Kết quả mua' : 'Kết quả bán'}</strong>
+          <p>${isBuy
+            ? `Bạn đã dùng ${formatVND(amountVnd)} để mua ${formatNumber(amountBtc, 8)} BTC theo ${escapeHTML(sourceLabel.toLowerCase())}.`
+            : `Bạn đã bán ${formatNumber(amountBtc, 8)} BTC và nhận ${formatVND(amountVnd)} vào ví demo theo ${escapeHTML(sourceLabel.toLowerCase())}.`}</p>
+        </div>
+
+        <div class="trade-detail-meta">
+          <div><span>Mã giao dịch</span><code title="${escapeHTML(tradeId)}">${escapeHTML(shortId)}</code></div>
+          <div><span>Thời gian ghi nhận</span><b>${createdAt ? formatVNTime(createdAt) : '—'}</b></div>
+        </div>
+      </div>
+
+      <footer class="trade-detail-footer">
+        <span>Đây là giao dịch mô phỏng phục vụ học tập, không phát sinh tiền thật.</span>
+        <button type="button" class="btn primary" data-close-trade-detail>Đóng</button>
+      </footer>
+    </section>
+  `;
+
+  const closeModal = () => {
+    document.removeEventListener('keydown', handleEscape);
+    document.body.classList.remove('trade-detail-open');
+    modal.classList.remove('open');
+    window.setTimeout(() => modal.remove(), 180);
+  };
+  const handleEscape = event => {
+    if (event.key === 'Escape') closeModal();
+  };
+
+  modal.querySelectorAll('[data-close-trade-detail]').forEach(el => el.addEventListener('click', closeModal));
+  document.body.appendChild(modal);
+  document.body.classList.add('trade-detail-open');
+  document.addEventListener('keydown', handleEscape);
+  requestAnimationFrame(() => {
+    modal.classList.add('open');
+    modal.querySelector('.trade-detail-close')?.focus({ preventScroll: true });
+  });
 }
 
 function loadOrders() { return []; }

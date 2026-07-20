@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
@@ -92,84 +91,6 @@ async def _p2p_with_fallback(hours: int = 168) -> tuple[list[dict], str, dict | 
     mock = load_mock_data()["p2p"]
     data = mock.get("data", [])[: hours * 2]
     return data, "mock", data[0] if data else None
-
-
-@router.get("/overview")
-async def market_overview(hours: int = Query(24, ge=1, le=720)):
-    """Compact payload used by Dashboard and Decision Hub.
-
-    It replaces several simultaneous browser requests with one response and
-    performs independent Supabase reads in worker threads so the FastAPI event
-    loop stays responsive on small hosted instances.
-    """
-    latest, ohlcv_rows, p2p_rows = await asyncio.gather(
-        asyncio.to_thread(get_latest_ohlcv),
-        asyncio.to_thread(get_ohlcv, hours),
-        asyncio.to_thread(get_p2p_spread, min(hours, 24)),
-    )
-
-    mock = load_mock_data()
-    latest_source = "supabase" if latest else "mock"
-    ohlcv_source = "supabase" if ohlcv_rows else "mock"
-    p2p_source = "supabase" if p2p_rows else "mock"
-    latest = latest or mock.get("latest") or {}
-    if not ohlcv_rows:
-        ohlcv_rows = ((mock.get("ohlcv") or {}).get("data") or [])[-hours:]
-    if not p2p_rows:
-        p2p_rows = ((mock.get("p2p") or {}).get("data") or [])[: min(hours, 24) * 2]
-
-    latest_p2p_ts = p2p_rows[0].get("timestamp") if p2p_rows else None
-    ohlcv_age = _age_hours(latest.get("timestamp"))
-    p2p_age = _age_hours(latest_p2p_ts)
-    status = {
-        "now_utc": datetime.now(timezone.utc).isoformat(),
-        "latest_ohlcv_timestamp": latest.get("timestamp"),
-        "latest_p2p_timestamp": latest_p2p_ts,
-        "ohlcv_age_hours": ohlcv_age,
-        "p2p_age_hours": p2p_age,
-        "is_ohlcv_fresh": ohlcv_age is not None and ohlcv_age <= 2,
-        "is_p2p_fresh": p2p_age is not None and p2p_age <= 2,
-    }
-    summary = signal_from_latest(latest)
-    risk = calculate_risk_score(latest, status)
-    alerts = generate_market_alerts(latest, summary, p2p_rows[:2], status)
-
-    def comparison(row: dict | None, user_side: str) -> dict | None:
-        if not row:
-            return None
-        p2p_price = row.get("p2p_price")
-        market_price = row.get("market_price")
-        if not isinstance(p2p_price, (int, float)) or not isinstance(market_price, (int, float)) or not market_price:
-            return None
-        diff = p2p_price - market_price
-        return {
-            "trade_type": row.get("trade_type"),
-            "user_side": user_side,
-            "p2p_price": p2p_price,
-            "market_price": market_price,
-            "difference_vnd": round(diff, 0),
-            "difference_pct": round(diff / market_price * 100, 4),
-            "favorable": diff > 0 if user_side == "sell" else diff < 0,
-            "samples": row.get("samples"),
-            "timestamp": row.get("timestamp"),
-        }
-
-    latest_sell = next((row for row in p2p_rows if row.get("trade_type") == "SELL"), None)
-    latest_buy = next((row for row in p2p_rows if row.get("trade_type") == "BUY"), None)
-    return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "latest": latest,
-        "latest_source": latest_source,
-        "summary": summary,
-        "ohlcv": {"symbol": "BTCUSDT", "timeframe": "1h", "hours": hours, "count": len(ohlcv_rows), "data": ohlcv_rows},
-        "ohlcv_source": ohlcv_source,
-        "risk": {"timestamp": latest.get("timestamp"), "price": latest.get("close"), "source": latest_source, **risk},
-        "alerts": {"count": len(alerts), "data": alerts},
-        "p2p": {"count": len(p2p_rows), "hours": min(hours, 24), "latest": p2p_rows[0] if p2p_rows else None, "data": p2p_rows},
-        "p2p_source": p2p_source,
-        "comparison": {"sell": comparison(latest_sell, "sell"), "buy": comparison(latest_buy, "buy")},
-        "data_status": status,
-    }
 
 
 @router.get("/latest")
