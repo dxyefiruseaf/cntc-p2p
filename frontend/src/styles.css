@@ -8784,3 +8784,615 @@ body[data-theme="dark"] .technical-pro-p2p-box {
     justify-content: space-between;
   }
 }
+
+/* User workspace density — keep user content aligned closely to the sidebar. */
+html.user-mode body.user-mode .app-shell {
+  width: auto;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+  padding-left: calc(var(--sidebar) + 20px);
+  padding-right: 20px;
+}
+
+html.user-mode body.user-mode .site-footer {
+  margin-left: var(--sidebar);
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+body.user-mode .page-head {
+  margin-bottom: 16px;
+}
+
+body.user-mode .page-head h1 {
+  font-size: clamp(1.85rem, 3vw, 3.15rem);
+  line-height: 1.02;
+}
+
+body.user-mode .page-head .lead {
+  max-width: 920px;
+  margin-top: 10px;
+  font-size: .98rem;
+  line-height: 1.58;
+}
+
+body.user-mode .hero {
+  padding: clamp(22px, 3vw, 38px);
+  border-radius: 24px;
+}
+
+body.user-mode .section {
+  margin-top: 22px;
+}
+
+body.user-mode .section-head {
+  margin-bottom: 12px;
+}
+
+body.user-mode .grid {
+  gap: 14px;
+}
+
+body.user-mode .card,
+body.user-mode .stat-card {
+  padding: 16px;
+  border-radius: 18px;
+}
+
+body.user-mode .kpi-row {
+  gap: 12px;
+}
+
+body.user-mode .side-nav {
+  box-shadow: 10px 0 34px rgba(15, 23, 42, .035);
+}
+
+body.user-mode:not(.ux-sidebar-compact) .side-nav {
+  width: 236px;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+body.user-mode:not(.ux-sidebar-compact) {
+  --sidebar: 236px;
+}
+
+body.user-mode:not(.ux-sidebar-compact) .side-head {
+  margin-bottom: 12px;
+  padding: 13px;
+}
+
+body.user-mode:not(.ux-sidebar-compact) .side-nav a {
+  min-height: 40px;
+  margin: 3px 0;
+  padding: 9px 10px;
+  border-radius: 11px;
+  font-size: .84rem;
+}
+
+body.user-mode:not(.ux-sidebar-compact) .side-label {
+  margin-top: 13px;
+}
+
+/* Rich Admin market visualization and paginated activity log. */
+.admin-panel-head p {
+  margin: 5px 0 0;
+  color: var(--admin-muted);
+  font-size: .68rem;
+  line-height: 1.45;
+}
+
+.admin-market-meta-rich {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(105px, 1fr));
+  gap: 8px;
+  padding: 12px 18px 2px;
+}
+
+.admin-market-meta-rich span {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(36, 44, 61, .9);
+  border-radius: 10px;
+  background: rgba(8, 13, 23, .52);
+  color: var(--admin-muted);
+}
+
+.admin-market-meta-rich span b {
+  display: block;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: var(--admin-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-market-meta-rich span.positive b {
+  color: var(--admin-green);
+}
+
+.admin-market-meta-rich span.negative b {
+  color: var(--admin-red);
+}
+
+.admin-market-chart.admin-market-chart-pro {
+  height: 560px;
+  min-height: 560px;
+}
+
+.admin-market-insights {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  border-top: 1px solid var(--admin-border);
+  background: var(--admin-border);
+}
+
+.admin-market-insights > span {
+  min-width: 0;
+  padding: 13px 15px;
+  background: #101622;
+}
+
+.admin-market-insights b,
+.admin-market-insights small {
+  display: block;
+}
+
+.admin-market-insights b {
+  overflow: hidden;
+  color: var(--admin-text);
+  font-size: .72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-market-insights small {
+  margin-top: 4px;
+  color: var(--admin-muted);
+  font-size: .61rem;
+  line-height: 1.35;
+}
+
+.admin-activity-panel-head {
+  align-items: flex-end;
+}
+
+.admin-activity-filter {
+  display: grid;
+  gap: 6px;
+  min-width: 190px;
+}
+
+.admin-activity-filter > span {
+  margin: 0;
+  color: var(--admin-muted);
+  font-size: .58rem;
+}
+
+.admin-activity-filter select {
+  min-height: 38px;
+  padding: 0 34px 0 11px;
+  border: 1px solid var(--admin-border);
+  border-radius: 9px;
+  background: #0d1421;
+  color: var(--admin-text);
+  font-size: .72rem;
+}
+
+.admin-activity-page-panel .admin-activity-list {
+  min-height: 300px;
+}
+
+@media (max-width: 1260px) {
+  .admin-market-meta-rich {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .admin-market-insights {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 980px) {
+  html.user-mode body.user-mode .app-shell {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  html.user-mode body.user-mode .site-footer {
+    margin-left: 0;
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+}
+
+@media (max-width: 680px) {
+  body.user-mode .card,
+  body.user-mode .stat-card {
+    padding: 14px;
+    border-radius: 16px;
+  }
+
+  .admin-market-meta-rich {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .admin-market-chart.admin-market-chart-pro {
+    height: 500px;
+    min-height: 500px;
+  }
+
+  .admin-market-insights {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-activity-panel-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-activity-filter {
+    width: 100%;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Admin fixed workspace + resilient blocks
+   Keeps the navigation rail pinned while only the right workspace scrolls.
+   -------------------------------------------------------------------------- */
+html.admin-mode,
+body.admin-mode {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body.admin-mode .app-shell,
+body.admin-mode.has-live-news .app-shell {
+  height: 100dvh;
+  min-height: 100dvh;
+  overflow: hidden;
+}
+
+body.admin-mode .admin-console {
+  --admin-fixed-rail: 240px;
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.admin-mode .admin-console-rail {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 40;
+  width: var(--admin-fixed-rail);
+  height: 100dvh;
+  min-height: 0;
+  padding: 20px 14px 16px;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+body.admin-mode .admin-brand {
+  flex: 0 0 auto;
+  padding-bottom: 20px;
+}
+
+body.admin-mode .admin-section-nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 3px;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #334057 transparent;
+}
+
+body.admin-mode .admin-section-nav::-webkit-scrollbar {
+  width: 5px;
+}
+
+body.admin-mode .admin-section-nav::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #334057;
+}
+
+body.admin-mode .admin-rail-bottom {
+  flex: 0 0 auto;
+  margin-top: 14px;
+}
+
+body.admin-mode .admin-console-main {
+  width: calc(100% - var(--admin-fixed-rail));
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  margin-left: var(--admin-fixed-rail);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  box-sizing: border-box;
+}
+
+body.admin-mode .admin-console-header {
+  top: 0;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+body.admin-mode .admin-console-header > div:first-child {
+  min-width: 0;
+}
+
+body.admin-mode .admin-console-header h1,
+body.admin-mode .admin-console-header p {
+  overflow-wrap: anywhere;
+}
+
+body.admin-mode .admin-data-status-mount,
+body.admin-mode .admin-console-content {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+body.admin-mode .admin-console-content {
+  max-width: 1900px;
+  margin-inline: auto;
+}
+
+body.admin-mode .admin-page,
+body.admin-mode .admin-panel,
+body.admin-mode .admin-user-table-column,
+body.admin-mode .admin-table-wrap,
+body.admin-mode .admin-market-panel,
+body.admin-mode .admin-live-panel {
+  min-width: 0;
+  max-width: 100%;
+}
+
+body.admin-mode .admin-kpi-grid {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+
+body.admin-mode .admin-kpi {
+  min-width: 0;
+}
+
+body.admin-mode .admin-overview-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(290px, .72fr);
+}
+
+body.admin-mode .admin-market-meta-rich {
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+}
+
+body.admin-mode .admin-market-chart,
+body.admin-mode .admin-market-chart-pro {
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+body.admin-mode .admin-market-insights {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+body.admin-mode .admin-users-toolbar,
+body.admin-mode .admin-panel-head,
+body.admin-mode .admin-page-heading {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+body.admin-mode .admin-user-filters {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+body.admin-mode .admin-search {
+  flex: 1 1 230px;
+  min-width: min(230px, 100%);
+}
+
+body.admin-mode .admin-users-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 300px);
+}
+
+body.admin-mode .admin-table-wrap {
+  width: 100%;
+  overflow: auto;
+  overscroll-behavior-inline: contain;
+}
+
+body.admin-mode .admin-user-table {
+  min-width: 860px;
+}
+
+body.admin-mode .admin-user-detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+body.admin-mode .admin-activity-item {
+  min-width: 0;
+}
+
+body.admin-mode .admin-activity-item > div,
+body.admin-mode .admin-activity-item strong,
+body.admin-mode .admin-activity-item p {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+body.admin-mode .admin-health-rings {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+
+body.admin-mode .admin-system-lines div {
+  min-width: 0;
+}
+
+body.admin-mode .admin-system-lines b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1380px) {
+  body.admin-mode .admin-overview-grid,
+  body.admin-mode .admin-two-column {
+    grid-template-columns: 1fr;
+  }
+
+  body.admin-mode .admin-users-layout {
+    grid-template-columns: 1fr;
+  }
+
+  body.admin-mode .admin-user-detail {
+    border-top: 1px solid var(--admin-border);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 1120px) {
+  body.admin-mode .admin-console {
+    --admin-fixed-rail: 78px;
+  }
+
+  body.admin-mode .admin-console-rail {
+    padding-inline: 10px;
+  }
+
+  body.admin-mode .admin-section-nav a,
+  body.admin-mode .admin-section-nav button {
+    justify-content: center;
+    padding-inline: 8px;
+  }
+
+  body.admin-mode .admin-section-nav a span,
+  body.admin-mode .admin-section-nav button span {
+    flex: 0 0 24px;
+  }
+
+  body.admin-mode .admin-profile-card {
+    justify-content: center;
+    padding-inline: 6px;
+  }
+
+  body.admin-mode .admin-profile-card > div,
+  body.admin-mode .admin-profile-logout {
+    display: none;
+  }
+
+  body.admin-mode .admin-console-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  body.admin-mode .admin-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  body.admin-mode .admin-console {
+    --admin-fixed-rail: 68px;
+  }
+
+  body.admin-mode .admin-console-rail {
+    padding: 12px 8px;
+  }
+
+  body.admin-mode .admin-brand {
+    padding-bottom: 14px;
+  }
+
+  body.admin-mode .admin-brand > span {
+    width: 38px;
+    height: 38px;
+  }
+
+  body.admin-mode .admin-console-header {
+    min-height: auto;
+    padding: 15px;
+  }
+
+  body.admin-mode .admin-console-content {
+    gap: 14px;
+    padding: 14px;
+  }
+
+  body.admin-mode .admin-data-status-mount {
+    padding-inline: 14px;
+  }
+
+  body.admin-mode .admin-kpi-grid,
+  body.admin-mode .admin-market-insights,
+  body.admin-mode .admin-health-rings {
+    grid-template-columns: 1fr;
+  }
+
+  body.admin-mode .admin-market-meta-rich {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  body.admin-mode .admin-users-toolbar,
+  body.admin-mode .admin-page-heading,
+  body.admin-mode .admin-panel-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  body.admin-mode .admin-user-filters,
+  body.admin-mode .admin-user-filters > *,
+  body.admin-mode .admin-search,
+  body.admin-mode .admin-activity-filter {
+    width: 100%;
+    min-width: 0;
+  }
+
+  body.admin-mode .admin-activity-item {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+  }
+
+  body.admin-mode .admin-activity-item time {
+    grid-column: 2 / -1;
+    justify-self: start;
+  }
+}
+
+@media (max-width: 480px) {
+  body.admin-mode .admin-console {
+    --admin-fixed-rail: 60px;
+  }
+
+  body.admin-mode .admin-console-rail {
+    padding-inline: 6px;
+  }
+
+  body.admin-mode .admin-section-nav a,
+  body.admin-mode .admin-section-nav button {
+    min-height: 44px;
+    padding-inline: 4px;
+  }
+
+  body.admin-mode .admin-market-meta-rich {
+    grid-template-columns: 1fr;
+  }
+
+  body.admin-mode .admin-header-actions > * {
+    width: 100%;
+  }
+}

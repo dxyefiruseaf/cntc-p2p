@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import admin, ai, alerts, demo_trades, market, news, payment, settlement, tax, wallet
+from app.routers import admin, ai, alerts, auth_status, demo_trades, market, news, payment, settlement, tax, wallet
 
 settings = get_settings()
 
@@ -56,6 +56,7 @@ def health():
     return {"status": "ok", "environment": settings.app_env}
 
 
+app.include_router(auth_status.router)
 app.include_router(market.router)
 app.include_router(news.router)
 app.include_router(tax.router)

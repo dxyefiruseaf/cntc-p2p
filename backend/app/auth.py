@@ -53,7 +53,7 @@ def get_current_user(request: Request) -> dict[str, Any]:
     try:
         user_res = sb.auth.get_user(token)
         user = _normalize_user(user_res)
-        profile = get_user_profile(user["id"])
+        profile = get_user_profile(user["id"], raise_on_error=True)
         if str((profile or {}).get("status") or "active").lower() != "active":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tài khoản đã bị tạm khóa")
         if profile:
@@ -75,7 +75,7 @@ def get_optional_user(request: Request) -> dict[str, Any] | None:
         return None
 
 
-def get_user_profile(user_id: str) -> dict[str, Any] | None:
+def get_user_profile(user_id: str, *, raise_on_error: bool = False) -> dict[str, Any] | None:
     """Load the application profile for an authenticated user.
 
     The auth token proves identity; the profile table is the source of truth for
@@ -94,7 +94,12 @@ def get_user_profile(user_id: str) -> dict[str, Any] | None:
             .execute()
         )
         return res.data[0] if res.data else None
-    except Exception:
+    except Exception as exc:
+        if raise_on_error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Không kiểm tra được trạng thái tài khoản. Vui lòng thử lại.",
+            ) from exc
         return None
 
 

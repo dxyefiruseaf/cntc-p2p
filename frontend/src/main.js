@@ -65,6 +65,8 @@ let chatMessages = [
 let orders = [];
 let currentSession = null;
 let currentUserProfile = null;
+let authAccessDeniedMessage = '';
+let lastSessionValidationAt = 0;
 let authReady = !supabaseAuth;
 let topTickerBusy = false;
 let lastTopTickerAt = 0;
@@ -153,6 +155,8 @@ function applyApplicationLayout(routeName) {
   const adminMode = routeName === 'admin';
   document.documentElement.classList.toggle('admin-mode', adminMode);
   document.body.classList.toggle('admin-mode', adminMode);
+  document.documentElement.classList.toggle('user-mode', !adminMode);
+  document.body.classList.toggle('user-mode', !adminMode);
   document.title = adminMode
     ? 'BTC BigData — Admin Console'
     : 'BTC BigData Platform — Bitcoin Market Dashboard';
@@ -167,14 +171,24 @@ function applyApplicationLayout(routeName) {
 function resetRouteViewport() {
   const root = document.documentElement;
   const previousBehavior = root.style.scrollBehavior;
+  const resetAdminScroller = () => {
+    const adminMain = document.querySelector('.admin-console-main');
+    if (!adminMain) return;
+    adminMain.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    adminMain.scrollTop = 0;
+    adminMain.scrollLeft = 0;
+  };
+
   root.style.scrollBehavior = 'auto';
   window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   root.scrollTop = 0;
   document.body.scrollTop = 0;
+  resetAdminScroller();
   requestAnimationFrame(() => {
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
     root.scrollTop = 0;
     document.body.scrollTop = 0;
+    resetAdminScroller();
     root.style.scrollBehavior = previousBehavior;
   });
 }
@@ -191,6 +205,7 @@ function route() {
   activeRoute = getCurrentRouteName();
   applyApplicationLayout(activeRoute);
   resetRouteViewport();
+  if (currentSession && activeRoute !== 'login') validateSessionStatusInBackground();
   // Cho phép vào #set-password cả khi đã có mật khẩu để user có thể đổi mật khẩu.
   // Luồng bắt buộc đặt mật khẩu lần đầu vẫn được xử lý trong redirectAfterLoginIfNeeded().
   if (protectedRoutes.has(activeRoute)) {
@@ -444,7 +459,10 @@ async function fetchJson(endpoint, options = {}) {
           const err = await response.json();
           detail = err.detail || detail;
         } catch (_) { }
-        throw new Error(detail);
+        const requestError = new Error(detail);
+        requestError.status = response.status;
+        requestError.detail = detail;
+        throw requestError;
       }
       return { data: await response.json(), source: 'api' };
     } catch (error) {
@@ -3037,9 +3055,60 @@ function authHeader() {
   return currentSession?.access_token ? { Authorization: `Bearer ${currentSession.access_token}` } : {};
 }
 
+function readableAuthError(error) {
+  const message = String(error?.message || error || '').trim();
+  if (/banned|temporarily blocked|tạm khóa|suspended/i.test(message)) {
+    return 'Tài khoản đã bị tạm khóa. Vui lòng liên hệ quản trị viên.';
+  }
+  if (/invalid login credentials/i.test(message)) return 'Email hoặc mật khẩu không chính xác.';
+  if (/email not confirmed/i.test(message)) return 'Email chưa được xác thực.';
+  return message || 'Không xác thực được tài khoản.';
+}
+
+async function signOutBlockedAccount(message = 'Tài khoản đã bị tạm khóa. Vui lòng liên hệ quản trị viên.') {
+  authAccessDeniedMessage = message;
+  try {
+    await supabaseAuth?.auth.signOut();
+  } catch (_) { }
+  currentSession = null;
+  currentUserProfile = null;
+  renderAuthHeader();
+  showToast(message, 5200);
+}
+
 async function loadCurrentUserProfile() {
   currentUserProfile = null;
+  authAccessDeniedMessage = '';
   if (!supabaseAuth || !currentSession?.user?.id) return null;
+
+  // Backend validation is authoritative because it uses the service-role client
+  // and checks user_profiles.status even when frontend RLS/profile reads fail.
+  try {
+    const response = await fetchJson('/api/auth/me', {
+      timeout: 15000,
+      headers: { 'Cache-Control': 'no-store' }
+    });
+    const profile = response.data?.profile || {};
+    currentUserProfile = {
+      user_id: response.data?.user_id || currentSession.user.id,
+      email: response.data?.email || currentSession.user.email,
+      role: response.data?.role || profile.role || 'user',
+      status: response.data?.status || profile.status || 'active',
+      ...profile
+    };
+    lastSessionValidationAt = Date.now();
+    return currentUserProfile;
+  } catch (error) {
+    const denied = Number(error?.status) === 403 || /tạm khóa|suspended|banned/i.test(String(error?.message || ''));
+    if (denied) {
+      await signOutBlockedAccount(readableAuthError(error));
+      return null;
+    }
+    console.warn('Backend chưa xác minh được trạng thái tài khoản, thử đọc profile trực tiếp:', error.message);
+  }
+
+  // Compatibility fallback for local deployments where the new /api/auth/me
+  // endpoint has not been deployed yet. Never assume active when this read fails.
   try {
     const { data, error } = await supabaseAuth
       .from('user_profiles')
@@ -3047,25 +3116,34 @@ async function loadCurrentUserProfile() {
       .eq('user_id', currentSession.user.id)
       .maybeSingle();
     if (error) throw error;
-    currentUserProfile = data || null;
-  } catch (error) {
-    console.warn('Không đọc được user_profiles:', error.message);
-    const metadataRole = currentSession.user.app_metadata?.role || currentSession.user.user_metadata?.role;
-    currentUserProfile = {
+    currentUserProfile = data || {
       user_id: currentSession.user.id,
       email: currentSession.user.email,
-      role: metadataRole === 'admin' ? 'admin' : 'user',
+      role: currentSession.user.app_metadata?.role || currentSession.user.user_metadata?.role || 'user',
       status: 'active'
     };
+  } catch (error) {
+    console.warn('Không đọc được user_profiles:', error.message);
+    await signOutBlockedAccount('Không xác minh được trạng thái tài khoản. Vui lòng thử đăng nhập lại sau.');
+    return null;
   }
 
-  if (currentUserProfile?.status === 'suspended') {
-    showToast('Tài khoản đã bị tạm khóa. Vui lòng liên hệ quản trị viên.');
-    await supabaseAuth.auth.signOut();
-    currentSession = null;
-    currentUserProfile = null;
+  if (String(currentUserProfile?.status || '').toLowerCase() === 'suspended') {
+    await signOutBlockedAccount();
+    return null;
   }
+  lastSessionValidationAt = Date.now();
   return currentUserProfile;
+}
+
+async function validateSessionStatusInBackground() {
+  if (!currentSession || Date.now() - lastSessionValidationAt < 30_000) return;
+  const sessionBefore = currentSession;
+  await loadCurrentUserProfile();
+  if (sessionBefore && !currentSession && getCurrentRouteName() !== 'login') {
+    setPendingNextRoute(getCurrentRouteName());
+    location.hash = '#login';
+  }
 }
 
 function isAdmin() {
@@ -3931,13 +4009,17 @@ async function verifyEmailOtp(mode, next = 'dashboard') {
     });
 
     if (error) {
-      result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu mã đã hết hạn, hãy gửi lại mã OTP mới.</small></div>`;
+      result.innerHTML = `<div class="state-box error">${escapeHTML(readableAuthError(error))}<br><small>Nếu mã đã hết hạn, hãy gửi lại mã OTP mới.</small></div>`;
       return;
     }
 
     currentSession = data.session || null;
     await syncCurrentUserProfile();
     await loadCurrentUserProfile();
+    if (!currentSession) {
+      result.innerHTML = `<div class="state-box error">${escapeHTML(authAccessDeniedMessage || 'Tài khoản không được phép đăng nhập.')}</div>`;
+      return;
+    }
     renderAuthHeader();
     showToast('Xác thực email thành công.');
     location.hash = needsPasswordSetup() ? '#set-password' : `#${next}`;
@@ -3973,14 +4055,17 @@ async function signInWithPasswordUI(next = 'dashboard') {
     const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
 
     if (error) {
-      result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu bạn chưa đặt mật khẩu, hãy dùng nút gửi mã OTP qua email.</small></div>`;
+      result.innerHTML = `<div class="state-box error">${escapeHTML(readableAuthError(error))}<br><small>Nếu bạn chưa đặt mật khẩu, hãy dùng nút gửi mã OTP qua email.</small></div>`;
       return;
     }
 
     currentSession = data.session || null;
     await syncCurrentUserProfile();
     await loadCurrentUserProfile();
-    if (!currentSession) return;
+    if (!currentSession) {
+      result.innerHTML = `<div class="state-box error">${escapeHTML(authAccessDeniedMessage || 'Tài khoản không được phép đăng nhập.')}</div>`;
+      return;
+    }
     renderAuthHeader();
     showToast(isAdmin() ? 'Đăng nhập admin thành công.' : 'Đăng nhập thành công.');
     location.hash = isAdmin() && next === 'dashboard' ? '#admin' : (needsPasswordSetup() ? '#set-password' : `#${next}`);
@@ -4199,7 +4284,7 @@ let adminDashboardCache = null;
 let adminLoadToken = 0;
 let adminUserSearchTimer = null;
 
-const ADMIN_CLIENT_CACHE_VERSION = 'v2';
+const ADMIN_CLIENT_CACHE_VERSION = 'v3';
 const ADMIN_CLIENT_CACHE_TTL = Object.freeze({
   overview: 45_000,
   users: 60_000,
@@ -4213,6 +4298,11 @@ const adminUserQueryState = {
   status: 'all',
   plan: 'all'
 };
+const adminActivityQueryState = {
+  page: 1,
+  limit: 20,
+  type: 'all'
+};
 
 function adminClientCachePrefix() {
   return `btc_admin_cache_${ADMIN_CLIENT_CACHE_VERSION}:${currentSession?.user?.id || 'anonymous'}:`;
@@ -4220,6 +4310,10 @@ function adminClientCachePrefix() {
 
 function adminClientCacheKey(view) {
   const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
+  if (safeView === 'activity') {
+    const query = adminActivityQueryState;
+    return `${adminClientCachePrefix()}activity:${query.page}:${query.limit}:${query.type}`;
+  }
   if (safeView !== 'users') return `${adminClientCachePrefix()}${safeView}`;
   const query = adminUserQueryState;
   return `${adminClientCachePrefix()}users:${query.page}:${query.limit}:${query.status}:${query.plan}:${query.search.trim().toLowerCase()}`;
@@ -4268,6 +4362,11 @@ function adminApiEndpoint(view, force = false) {
     if (adminUserQueryState.search.trim()) params.set('search', adminUserQueryState.search.trim());
     if (adminUserQueryState.status !== 'all') params.set('status', adminUserQueryState.status);
     if (adminUserQueryState.plan !== 'all') params.set('plan', adminUserQueryState.plan);
+  }
+  if (safeView === 'activity') {
+    params.set('page', String(adminActivityQueryState.page));
+    params.set('limit', String(adminActivityQueryState.limit));
+    if (adminActivityQueryState.type !== 'all') params.set('type', adminActivityQueryState.type);
   }
   const path = safeView === 'overview' ? '/api/admin/overview' : `/api/admin/${safeView}`;
   const query = params.toString();
@@ -4444,8 +4543,17 @@ function renderAdminConsoleContent(data, users, view = getAdminView(), options =
   const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
   const summary = data?.summary || {};
   const latest = data?.market?.latest || {};
+  const marketSeries = data?.market?.series || [];
   const activity = data?.activity || [];
+  const activityPage = data?.activity_page || {};
   const system = data?.system || {};
+  const firstMarketClose = Number(marketSeries[0]?.close);
+  const latestMarketClose = Number(latest.close);
+  const marketChangePct = Number.isFinite(firstMarketClose) && firstMarketClose !== 0 && Number.isFinite(latestMarketClose)
+    ? ((latestMarketClose - firstMarketClose) / firstMarketClose) * 100
+    : 0;
+  const hasTrendData = Number.isFinite(Number(latest.ema_20)) && Number.isFinite(Number(latest.ema_50));
+  const trendLabel = !hasTrendData ? 'Chưa đủ dữ liệu xu hướng' : Number(latest.ema_20) > Number(latest.ema_50) ? 'Xu hướng ngắn hạn tăng' : 'Xu hướng ngắn hạn giảm';
 
   const marketBadge = document.getElementById('adminMarketBadge');
   if (marketBadge) marketBadge.innerHTML = `BTC/USDT <strong>${formatUSD(Number(latest.close))}</strong>`;
@@ -4468,9 +4576,22 @@ function renderAdminConsoleContent(data, users, view = getAdminView(), options =
         </div>
         <div class="admin-overview-grid">
           <article class="admin-panel admin-market-panel">
-            <div class="admin-panel-head"><div><span>THỊ TRƯỜNG</span><h2>BTC/USDT · 72 giờ</h2></div><a href="#chart">Mở biểu đồ đầy đủ →</a></div>
-            <div class="admin-market-meta"><span>Low <b>${formatUSD(Number(latest.low))}</b></span><span>High <b>${formatUSD(Number(latest.high))}</b></span><span>EMA20 <b>${formatUSD(Number(latest.ema_20))}</b></span></div>
-            <div id="adminMarketChart" class="admin-market-chart"></div>
+            <div class="admin-panel-head"><div><span>THỊ TRƯỜNG</span><h2>BTC/USDT · 72 giờ</h2><p>Nến giá, EMA, Bollinger, khối lượng và RSI trên cùng một vùng phân tích.</p></div><a href="#chart">Mở biểu đồ đầy đủ →</a></div>
+            <div class="admin-market-meta admin-market-meta-rich">
+              <span>Hiện tại <b>${formatUSD(Number(latest.close))}</b></span>
+              <span class="${marketChangePct >= 0 ? 'positive' : 'negative'}">Biến động <b>${marketChangePct >= 0 ? '+' : ''}${formatNumber(marketChangePct, 2)}%</b></span>
+              <span>Low <b>${formatUSD(Number(latest.low))}</b></span>
+              <span>High <b>${formatUSD(Number(latest.high))}</b></span>
+              <span>RSI 14 <b>${formatNumber(Number(latest.rsi_14), 2)}</b></span>
+              <span>MACD <b>${formatNumber(Number(latest.macd), 2)}</b></span>
+            </div>
+            <div id="adminMarketChart" class="admin-market-chart admin-market-chart-pro"></div>
+            <div class="admin-market-insights">
+              <span><b>${trendLabel}</b><small>${hasTrendData ? `EMA20 ${Number(latest.ema_20) > Number(latest.ema_50) ? 'trên' : 'dưới'} EMA50` : 'Chờ dữ liệu EMA mới nhất'}</small></span>
+              <span><b>ATR ${formatNumber(Number(latest.atr_14), 2)}</b><small>Biên độ biến động 14 kỳ</small></span>
+              <span><b>Volume ${formatNumber(Number(latest.volume), 2)}</b><small>Khối lượng kỳ gần nhất</small></span>
+              <span><b>${latest.timestamp ? formatVNTime(latest.timestamp) : 'Chưa có dữ liệu'}</b><small>Cập nhật dữ liệu gần nhất</small></span>
+            </div>
           </article>
           <article class="admin-panel admin-live-panel">
             <div class="admin-panel-head"><div><span>HOẠT ĐỘNG MỚI</span><h2>Người dùng đang thao tác</h2></div></div>
@@ -4508,7 +4629,22 @@ function renderAdminConsoleContent(data, users, view = getAdminView(), options =
           ${adminKpi('₫', 'Doanh thu Sandbox', formatVND(Number(summary.revenue_vnd || 0)), 'Không phải doanh thu tiền thật')}
           ${adminKpi('AI', 'Câu hỏi AI', formatNumber(Number(summary.ai_questions || 0), 0), `${formatNumber(Number(summary.active_alerts || 0), 0)} cảnh báo đang bật`)}
         </div>
-        <article class="admin-panel admin-activity-page-panel"><div class="admin-panel-head"><div><span>ACTIVITY LOG</span><h2>Hoạt động gần đây</h2></div></div><div class="admin-activity-list">${renderAdminActivity(activity)}</div></article>
+        <article class="admin-panel admin-activity-page-panel">
+          <div class="admin-panel-head admin-activity-panel-head">
+            <div><span>ACTIVITY LOG</span><h2>Hoạt động gần đây</h2><p>Danh sách được phân trang để không tải toàn bộ lịch sử cùng lúc.</p></div>
+            <label class="admin-activity-filter">
+              <span>Loại hoạt động</span>
+              <select id="adminActivityType" aria-label="Lọc loại hoạt động">
+                <option value="all" ${adminActivityQueryState.type === 'all' ? 'selected' : ''}>Tất cả</option>
+                <option value="trade" ${adminActivityQueryState.type === 'trade' ? 'selected' : ''}>Giao dịch demo</option>
+                <option value="premium" ${adminActivityQueryState.type === 'premium' ? 'selected' : ''}>Premium</option>
+                <option value="ai" ${adminActivityQueryState.type === 'ai' ? 'selected' : ''}>AI Advisor</option>
+              </select>
+            </label>
+          </div>
+          <div class="admin-activity-list">${renderAdminActivity(activity)}</div>
+          <div id="adminActivityPagination" class="admin-pagination" aria-label="Phân trang hoạt động"></div>
+        </article>
       </section>`,
     system: `
       <section class="admin-page admin-system-page" aria-labelledby="adminSystemTitle">
@@ -4523,7 +4659,8 @@ function renderAdminConsoleContent(data, users, view = getAdminView(), options =
   content.dataset.adminView = safeView;
 
   if (safeView === 'users') setupAdminUserTable(users, data?.users || {});
-  if (safeView === 'overview') drawAdminMarketChart(data?.market?.series || []);
+  if (safeView === 'activity') setupAdminActivityPage(activityPage);
+  if (safeView === 'overview') drawAdminMarketChart(marketSeries);
 
   if (!options.preserveViewport) resetRouteViewport();
 }
@@ -4744,6 +4881,39 @@ function setupAdminUserTable(users, meta = {}) {
   }
 }
 
+function setupAdminActivityPage(meta = {}) {
+  const typeSelect = document.getElementById('adminActivityType');
+  const pagination = document.getElementById('adminActivityPagination');
+  const page = Math.max(1, Number(meta.page || adminActivityQueryState.page || 1));
+  const pageSize = Math.max(1, Number(meta.page_size || adminActivityQueryState.limit || 20));
+  const total = Math.max(0, Number(meta.total || 0));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  adminActivityQueryState.page = Math.min(page, totalPages);
+  adminActivityQueryState.limit = pageSize;
+
+  typeSelect?.addEventListener('change', () => {
+    adminActivityQueryState.type = typeSelect.value || 'all';
+    adminActivityQueryState.page = 1;
+    loadAdminConsole(false, 'activity', { skipClientCache: false, showLoading: true });
+  });
+
+  if (!pagination) return;
+  pagination.innerHTML = `
+    <button id="adminActivityPrev" class="admin-page-button" type="button" ${page <= 1 ? 'disabled' : ''}>← Trước</button>
+    <div><strong>Trang ${formatNumber(page, 0)} / ${formatNumber(totalPages, 0)}</strong><span>${formatNumber(total, 0)} hoạt động</span></div>
+    <button id="adminActivityNext" class="admin-page-button" type="button" ${!meta.has_next || page >= totalPages ? 'disabled' : ''}>Tiếp →</button>`;
+
+  document.getElementById('adminActivityPrev')?.addEventListener('click', () => {
+    adminActivityQueryState.page = Math.max(1, page - 1);
+    loadAdminConsole(false, 'activity', { showLoading: true });
+  });
+  document.getElementById('adminActivityNext')?.addEventListener('click', () => {
+    adminActivityQueryState.page = Math.min(totalPages, page + 1);
+    loadAdminConsole(false, 'activity', { showLoading: true });
+  });
+}
+
 function renderAdminUsersRows(users) {
   const body = document.getElementById('adminUsersBody');
   if (!body) return;
@@ -4817,22 +4987,94 @@ function drawAdminMarketChart(rows) {
   if (!el || !window.echarts || !rows?.length) return;
   const chart = echarts.init(el);
   charts.push(chart);
+
   const labels = rows.map(row => formatVNTime(row.timestamp, 'short'));
+  const volumes = rows.map(row => ({
+    value: Number(row.volume || 0),
+    itemStyle: { color: Number(row.close) >= Number(row.open) ? 'rgba(32,213,164,.55)' : 'rgba(255,127,140,.55)' }
+  }));
+  const textColor = document.documentElement.classList.contains('dark') ? '#cbd5e1' : '#64748b';
+  const gridColor = document.documentElement.classList.contains('dark') ? 'rgba(148,163,184,.12)' : 'rgba(100,116,139,.13)';
+
   chart.setOption({
     animation: false,
     backgroundColor: 'transparent',
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    legend: { top: 4, right: 8, textStyle: { color: '#b9c1d3' }, data: ['OHLC', 'EMA20', 'EMA50'] },
-    grid: { left: 48, right: 24, top: 42, bottom: 36 },
-    xAxis: { type: 'category', data: labels, boundaryGap: true, axisLabel: { color: '#75809a', hideOverlap: true }, axisLine: { lineStyle: { color: '#263044' } } },
-    yAxis: { scale: true, axisLabel: { color: '#75809a', formatter: value => `$${Math.round(value / 1000)}k` }, splitLine: { lineStyle: { color: 'rgba(117,128,154,.12)' } } },
-    dataZoom: [{ type: 'inside', start: 25, end: 100 }],
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      backgroundColor: 'rgba(15,23,42,.96)',
+      borderColor: 'rgba(148,163,184,.25)',
+      textStyle: { color: '#f8fafc' },
+      formatter(params) {
+        const index = params?.[0]?.dataIndex ?? 0;
+        const row = rows[index] || {};
+        return [
+          `<b>${escapeHTML(formatVNTime(row.timestamp))}</b>`,
+          `Mở: ${formatUSD(Number(row.open))}`,
+          `Cao: ${formatUSD(Number(row.high))}`,
+          `Thấp: ${formatUSD(Number(row.low))}`,
+          `Đóng: ${formatUSD(Number(row.close))}`,
+          `Volume: ${formatNumber(Number(row.volume), 2)}`,
+          `RSI: ${formatNumber(Number(row.rsi_14), 2)}`
+        ].join('<br>');
+      }
+    },
+    legend: {
+      top: 2,
+      right: 8,
+      textStyle: { color: textColor },
+      selected: { 'BB Upper': false, 'BB Lower': false },
+      data: ['OHLC', 'EMA20', 'EMA50', 'EMA200', 'BB Upper', 'BB Lower']
+    },
+    grid: [
+      { left: 58, right: 28, top: 44, height: '42%' },
+      { left: 58, right: 28, top: '53%', height: '9%' },
+      { left: 58, right: 28, top: '66%', height: '9%' },
+      { left: 58, right: 28, top: '79%', height: '10%' }
+    ],
+    xAxis: [
+      { type: 'category', data: labels, boundaryGap: true, axisLabel: { show: false }, axisLine: { lineStyle: { color: gridColor } }, splitLine: { show: false } },
+      { type: 'category', gridIndex: 1, data: labels, boundaryGap: true, axisLabel: { show: false }, axisLine: { lineStyle: { color: gridColor } }, splitLine: { show: false } },
+      { type: 'category', gridIndex: 2, data: labels, boundaryGap: true, axisLabel: { show: false }, axisLine: { lineStyle: { color: gridColor } }, splitLine: { show: false } },
+      { type: 'category', gridIndex: 3, data: labels, boundaryGap: true, axisLabel: { color: textColor, hideOverlap: true }, axisLine: { lineStyle: { color: gridColor } }, splitLine: { show: false } }
+    ],
+    yAxis: [
+      { scale: true, axisLabel: { color: textColor, formatter: value => `$${Math.round(value / 1000)}k` }, splitLine: { lineStyle: { color: gridColor } } },
+      { gridIndex: 1, scale: true, axisLabel: { color: textColor, formatter: value => Number(value).toLocaleString('en-US', { notation: 'compact' }) }, splitLine: { show: false } },
+      { gridIndex: 2, min: 0, max: 100, interval: 50, axisLabel: { color: textColor }, splitLine: { lineStyle: { color: gridColor } } },
+      { gridIndex: 3, scale: true, axisLabel: { color: textColor, formatter: value => Number(value).toFixed(0) }, splitLine: { lineStyle: { color: gridColor } } }
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1, 2, 3], start: 15, end: 100 },
+      { type: 'slider', xAxisIndex: [0, 1, 2, 3], bottom: 0, height: 18, start: 15, end: 100, borderColor: 'transparent', textStyle: { color: textColor } }
+    ],
     series: [
       { name: 'OHLC', type: 'candlestick', data: rows.map(row => [row.open, row.close, row.low, row.high]), itemStyle: { color: '#20d5a4', color0: '#ff7f8c', borderColor: '#20d5a4', borderColor0: '#ff7f8c' } },
-      { name: 'EMA20', type: 'line', data: rows.map(row => row.ema_20), showSymbol: false, smooth: true, lineStyle: { width: 1.7, color: '#ffb873' } },
-      { name: 'EMA50', type: 'line', data: rows.map(row => row.ema_50), showSymbol: false, smooth: true, lineStyle: { width: 1.4, color: '#5dc9ff' } }
+      { name: 'EMA20', type: 'line', data: rows.map(row => row.ema_20), showSymbol: false, smooth: true, lineStyle: { width: 1.8, color: '#ffb873' } },
+      { name: 'EMA50', type: 'line', data: rows.map(row => row.ema_50), showSymbol: false, smooth: true, lineStyle: { width: 1.5, color: '#5dc9ff' } },
+      { name: 'EMA200', type: 'line', data: rows.map(row => row.ema_200), showSymbol: false, smooth: true, lineStyle: { width: 1.35, color: '#a78bfa' } },
+      { name: 'BB Upper', type: 'line', data: rows.map(row => row.bb_upper), showSymbol: false, lineStyle: { width: 1, type: 'dashed', color: '#94a3b8' } },
+      { name: 'BB Lower', type: 'line', data: rows.map(row => row.bb_lower), showSymbol: false, lineStyle: { width: 1, type: 'dashed', color: '#94a3b8' } },
+      { name: 'Khối lượng', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volumes, barMaxWidth: 9 },
+      {
+        name: 'RSI 14', type: 'line', xAxisIndex: 2, yAxisIndex: 2, data: rows.map(row => row.rsi_14), showSymbol: false, lineStyle: { width: 1.7, color: '#f7931a' },
+        markLine: { silent: true, symbol: 'none', label: { show: false }, data: [
+          { yAxis: 30, lineStyle: { color: '#38bdf8', type: 'dashed', opacity: .65 } },
+          { yAxis: 70, lineStyle: { color: '#ef4444', type: 'dashed', opacity: .65 } }
+        ] }
+      },
+      {
+        name: 'MACD Hist', type: 'bar', xAxisIndex: 3, yAxisIndex: 3, barMaxWidth: 8,
+        data: rows.map(row => ({
+          value: Number(row.macd_hist || 0),
+          itemStyle: { color: Number(row.macd_hist || 0) >= 0 ? 'rgba(32,213,164,.62)' : 'rgba(255,127,140,.62)' }
+        }))
+      },
+      { name: 'MACD', type: 'line', xAxisIndex: 3, yAxisIndex: 3, data: rows.map(row => row.macd), showSymbol: false, lineStyle: { width: 1.35, color: '#5dc9ff' } },
+      { name: 'Signal', type: 'line', xAxisIndex: 3, yAxisIndex: 3, data: rows.map(row => row.macd_signal), showSymbol: false, lineStyle: { width: 1.25, color: '#ffb873' } }
     ]
-  });
+  }, true);
 }
 
 function renderSettlementPage() {

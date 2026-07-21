@@ -278,24 +278,40 @@ def _profiles_for_ids(user_ids: set[str]) -> list[dict[str, Any]]:
     )
 
 
-def _recent_activity_rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    orders = _rows(
-        "orders",
-        "id,user_id,plan_id,amount_vnd,vnp_txn_ref,status,created_at,paid_at",
-        limit=30,
-        order_by="created_at",
+def _recent_activity_rows(
+    limit_per_source: int = 30,
+    kind: str = "all",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    safe_limit = max(1, min(500, int(limit_per_source)))
+    orders = (
+        _rows(
+            "orders",
+            "id,user_id,plan_id,amount_vnd,vnp_txn_ref,status,created_at,paid_at",
+            limit=safe_limit,
+            order_by="created_at",
+        )
+        if kind in {"all", "premium"}
+        else []
     )
-    trades = _rows(
-        "demo_trades",
-        "id,user_id,side,amount_vnd,amount_usdt,applied_price,created_at",
-        limit=30,
-        order_by="created_at",
+    trades = (
+        _rows(
+            "demo_trades",
+            "id,user_id,side,amount_vnd,amount_usdt,applied_price,created_at",
+            limit=safe_limit,
+            order_by="created_at",
+        )
+        if kind in {"all", "trade"}
+        else []
     )
-    ai_rows = _rows(
-        "ai_analysis_history",
-        "id,user_id,question,verdict,confidence,created_at",
-        limit=30,
-        order_by="created_at",
+    ai_rows = (
+        _rows(
+            "ai_analysis_history",
+            "id,user_id,question,verdict,confidence,created_at",
+            limit=safe_limit,
+            order_by="created_at",
+        )
+        if kind in {"all", "ai"}
+        else []
     )
     user_ids = {
         str(row.get("user_id") or "")
@@ -311,13 +327,16 @@ def _recent_activity(
     orders: list[dict[str, Any]],
     trades: list[dict[str, Any]],
     ai_rows: list[dict[str, Any]],
+    *,
+    max_items: int | None = 18,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     profile_by_id = {str(row.get("user_id")): row for row in profiles}
 
-    for row in orders[:12]:
+    for row in orders:
         profile = profile_by_id.get(str(row.get("user_id")), {})
         items.append({
+            "id": row.get("id"),
             "type": "premium",
             "title": "Thanh toán Premium Sandbox",
             "detail": profile.get("email") or "Người dùng",
@@ -325,9 +344,10 @@ def _recent_activity(
             "amount_vnd": row.get("amount_vnd"),
             "created_at": row.get("paid_at") or row.get("created_at"),
         })
-    for row in trades[:12]:
+    for row in trades:
         profile = profile_by_id.get(str(row.get("user_id")), {})
         items.append({
+            "id": row.get("id"),
             "type": "trade",
             "title": f"Lệnh {str(row.get('side') or '').upper()} demo",
             "detail": profile.get("email") or "Người dùng",
@@ -335,9 +355,10 @@ def _recent_activity(
             "amount_vnd": row.get("amount_vnd"),
             "created_at": row.get("created_at"),
         })
-    for row in ai_rows[:10]:
+    for row in ai_rows:
         profile = profile_by_id.get(str(row.get("user_id")), {})
         items.append({
+            "id": row.get("id"),
             "type": "ai",
             "title": "Câu hỏi AI Advisor",
             "detail": profile.get("email") or "Người dùng",
@@ -349,7 +370,41 @@ def _recent_activity(
         key=lambda item: _parse_time(item.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
-    return items[:18]
+    return items if max_items is None else items[:max_items]
+
+
+def _activity_total(kind: str) -> int:
+    if kind == "premium":
+        return _count("orders", "id")
+    if kind == "trade":
+        return _count("demo_trades", "id")
+    if kind == "ai":
+        return _count("ai_analysis_history", "id")
+    return (
+        _count("orders", "id")
+        + _count("demo_trades", "id")
+        + _count("ai_analysis_history", "id")
+    )
+
+
+def _activity_page(page: int, limit: int, kind: str) -> dict[str, Any]:
+    # To keep a globally sorted mixed feed, read only the newest window required
+    # for the requested page from each source, merge it, then slice one page.
+    window = min(500, max(limit, page * limit + limit))
+    profiles, orders, trades, ai_rows = _recent_activity_rows(window, kind)
+    combined = _recent_activity(profiles, orders, trades, ai_rows, max_items=None)
+    offset = (page - 1) * limit
+    total = _activity_total(kind)
+    rows = combined[offset: offset + limit]
+    return {
+        "count": len(rows),
+        "total": total,
+        "page": page,
+        "page_size": limit,
+        "has_next": page * limit < total,
+        "type": kind,
+        "data": rows,
+    }
 
 
 def _system_payload(*, data_points: int = 0, force_freshness: bool = False) -> dict[str, Any]:
@@ -377,12 +432,13 @@ def _overview_data() -> dict[str, Any]:
     }
 
 
-def _activity_data() -> dict[str, Any]:
-    profiles, orders, trades, ai_rows = _recent_activity_rows()
+def _activity_data(page: int, limit: int, kind: str) -> dict[str, Any]:
+    activity_page = _activity_page(page, limit, kind)
     return {
         "summary": _dashboard_summary(),
         "market": {"latest": get_latest_ohlcv() or {}, "series": []},
-        "activity": _recent_activity(profiles, orders, trades, ai_rows),
+        "activity": activity_page["data"],
+        "activity_page": activity_page,
         "system": _system_payload(data_points=72),
     }
 
@@ -629,11 +685,22 @@ def admin_dashboard(
 def admin_activity(
     request: Request,
     response: Response,
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=10, le=100),
+    type: str = Query("all", pattern="^(all|trade|premium|ai)$"),
     refresh: bool = Query(False),
 ):
     admin = require_admin(request)
+    cache_key = f"admin:activity:{page}:{limit}:{type}"
     _private_cache_headers(response, ACTIVITY_CACHE_SECONDS)
-    payload = dict(_cached("admin:activity", ACTIVITY_CACHE_SECONDS, _activity_data, refresh=refresh))
+    payload = dict(
+        _cached(
+            cache_key,
+            ACTIVITY_CACHE_SECONDS,
+            lambda: _activity_data(page, limit, type),
+            refresh=refresh,
+        )
+    )
     payload["admin"] = {"email": admin.get("email"), "role": "admin"}
     return payload
 
@@ -724,6 +791,21 @@ def update_admin_user_status(user_id: str, payload: AdminUserStatusUpdate, reque
     sb = get_supabase()
     if sb is None:
         raise HTTPException(status_code=503, detail="Supabase chưa được cấu hình")
+    # Keep application status and Supabase Auth status in sync. A profile-only
+    # lock still lets Supabase issue a session, so suspended users are also
+    # banned at the Auth layer. Existing access tokens are blocked immediately
+    # by get_current_user(), which checks user_profiles.status on every protected
+    # backend request.
+    auth_ban_duration = "876000h" if payload.status == "suspended" else "none"
+    rollback_ban_duration = "none" if payload.status == "suspended" else "876000h"
+    try:
+        sb.auth.admin.update_user_by_id(user_id, {"ban_duration": auth_ban_duration})
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Không cập nhật được trạng thái đăng nhập Supabase Auth: {exc}",
+        ) from exc
+
     try:
         res = (
             sb.table("user_profiles")
@@ -732,8 +814,16 @@ def update_admin_user_status(user_id: str, payload: AdminUserStatusUpdate, reque
             .execute()
         )
     except Exception as exc:
+        try:
+            sb.auth.admin.update_user_by_id(user_id, {"ban_duration": rollback_ban_duration})
+        except Exception:
+            pass
         raise HTTPException(status_code=503, detail=f"Không cập nhật được trạng thái người dùng: {exc}") from exc
     if not res.data:
+        try:
+            sb.auth.admin.update_user_by_id(user_id, {"ban_duration": rollback_ban_duration})
+        except Exception:
+            pass
         raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
     _invalidate_admin_cache("admin:users", "admin:overview", "admin:activity", "admin:system")
     return res.data[0]
