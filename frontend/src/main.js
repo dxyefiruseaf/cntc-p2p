@@ -4196,6 +4196,83 @@ function renderAccountPage() {
 
 let adminUsersCache = [];
 let adminDashboardCache = null;
+let adminLoadToken = 0;
+let adminUserSearchTimer = null;
+
+const ADMIN_CLIENT_CACHE_VERSION = 'v2';
+const ADMIN_CLIENT_CACHE_TTL = Object.freeze({
+  overview: 45_000,
+  users: 60_000,
+  activity: 30_000,
+  system: 15_000
+});
+const adminUserQueryState = {
+  page: 1,
+  limit: 30,
+  search: '',
+  status: 'all',
+  plan: 'all'
+};
+
+function adminClientCachePrefix() {
+  return `btc_admin_cache_${ADMIN_CLIENT_CACHE_VERSION}:${currentSession?.user?.id || 'anonymous'}:`;
+}
+
+function adminClientCacheKey(view) {
+  const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
+  if (safeView !== 'users') return `${adminClientCachePrefix()}${safeView}`;
+  const query = adminUserQueryState;
+  return `${adminClientCachePrefix()}users:${query.page}:${query.limit}:${query.status}:${query.plan}:${query.search.trim().toLowerCase()}`;
+}
+
+function readAdminClientCache(view) {
+  try {
+    const raw = sessionStorage.getItem(adminClientCacheKey(view));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.data || !Number.isFinite(Number(parsed.savedAt))) return null;
+    const ttl = ADMIN_CLIENT_CACHE_TTL[view] || 30_000;
+    return {
+      data: parsed.data,
+      fresh: Date.now() - Number(parsed.savedAt) < ttl
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeAdminClientCache(view, data) {
+  try {
+    sessionStorage.setItem(adminClientCacheKey(view), JSON.stringify({ data, savedAt: Date.now() }));
+  } catch (_) { }
+}
+
+function clearAdminClientCache(view = null) {
+  const prefix = adminClientCachePrefix();
+  try {
+    for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+      const key = sessionStorage.key(index);
+      if (!key?.startsWith(prefix)) continue;
+      if (!view || key.startsWith(`${prefix}${view}`)) sessionStorage.removeItem(key);
+    }
+  } catch (_) { }
+}
+
+function adminApiEndpoint(view, force = false) {
+  const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
+  const params = new URLSearchParams();
+  if (force) params.set('refresh', '1');
+  if (safeView === 'users') {
+    params.set('page', String(adminUserQueryState.page));
+    params.set('limit', String(adminUserQueryState.limit));
+    if (adminUserQueryState.search.trim()) params.set('search', adminUserQueryState.search.trim());
+    if (adminUserQueryState.status !== 'all') params.set('status', adminUserQueryState.status);
+    if (adminUserQueryState.plan !== 'all') params.set('plan', adminUserQueryState.plan);
+  }
+  const path = safeView === 'overview' ? '/api/admin/overview' : `/api/admin/${safeView}`;
+  const query = params.toString();
+  return query ? `${path}?${query}` : path;
+}
 
 const ADMIN_VIEW_CONFIG = Object.freeze({
   overview: {
@@ -4294,6 +4371,7 @@ async function renderAdminPage() {
     } finally {
       currentSession = null;
       currentUserProfile = null;
+      clearAdminClientCache();
       adminDashboardCache = null;
       adminUsersCache = [];
       renderAuthHeader();
@@ -4306,39 +4384,61 @@ async function renderAdminPage() {
   await loadAdminConsole(false, adminView);
 }
 
-async function loadAdminConsole(force = false, view = getAdminView()) {
+async function loadAdminConsole(force = false, view = getAdminView(), options = {}) {
   const content = document.getElementById('adminConsoleContent');
   const refreshButton = document.getElementById('adminRefresh');
   if (!content) return;
-  if (force) {
-    adminDashboardCache = null;
-    adminUsersCache = [];
+
+  const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
+  const skipClientCache = Boolean(options.skipClientCache);
+  const showLoading = options.showLoading !== false;
+  const cached = !force && !skipClientCache ? readAdminClientCache(safeView) : null;
+
+  if (cached?.data) {
+    adminDashboardCache = cached.data;
+    adminUsersCache = cached.data?.users?.data || [];
+    renderAdminConsoleContent(adminDashboardCache, adminUsersCache, safeView, options);
+    if (cached.fresh) return;
+  }
+
+  if (force) clearAdminClientCache(safeView);
+  if (!cached?.data && showLoading) {
     content.innerHTML = `<section class="admin-loading-grid">${loadingCard(150)}${loadingCard(150)}${loadingCard(340)}</section>`;
   }
-  setActionBusy(refreshButton, true, 'Đang tải...');
+
+  const requestToken = ++adminLoadToken;
+  setActionBusy(refreshButton, true, cached?.data ? 'Đang cập nhật...' : 'Đang tải...');
   try {
-    const requests = [fetchJson('/api/admin/dashboard', { timeout: 45000 })];
-    if (view === 'users') requests.push(fetchJson('/api/admin/users?limit=200', { timeout: 45000 }));
-    const results = await Promise.all(requests);
-    adminDashboardCache = results[0].data;
-    if (view === 'users') adminUsersCache = results[1]?.data?.data || [];
-    renderAdminConsoleContent(adminDashboardCache, adminUsersCache, view);
+    const response = await fetchJson(adminApiEndpoint(safeView, force), {
+      timeout: 45000,
+      headers: force ? { 'Cache-Control': 'no-cache' } : undefined
+    });
+    if (requestToken !== adminLoadToken || activeRoute !== 'admin' || getAdminView() !== safeView) return;
+
+    adminDashboardCache = response.data || {};
+    adminUsersCache = adminDashboardCache?.users?.data || [];
+    writeAdminClientCache(safeView, adminDashboardCache);
+    renderAdminConsoleContent(adminDashboardCache, adminUsersCache, safeView, options);
   } catch (error) {
+    if (cached?.data) {
+      showToast(`Đang hiển thị dữ liệu cache: ${error.message}`);
+      return;
+    }
     content.innerHTML = `
       <section class="admin-error-panel">
         <span class="badge red">Không tải được trang quản trị</span>
         <h2>Kiểm tra migration và quyền admin</h2>
         <p>${escapeHTML(error.message)}</p>
-        <p class="muted">Chạy phần Feature upgrade v3 trong <code>supabase/schema.sql</code>, <code>supabase/rls.sql</code> và tạo admin bằng <code>backend/scripts/create_admin.py</code>.</p>
+        <p class="muted">Chạy phần Feature upgrade v4 trong <code>supabase/schema.sql</code>, sau đó triển khai lại backend.</p>
         <button class="btn admin-accent" id="adminRetry" type="button">Thử lại</button>
       </section>`;
-    document.getElementById('adminRetry')?.addEventListener('click', () => loadAdminConsole(true, view));
+    document.getElementById('adminRetry')?.addEventListener('click', () => loadAdminConsole(true, safeView));
   } finally {
-    setActionBusy(refreshButton, false);
+    if (requestToken === adminLoadToken) setActionBusy(refreshButton, false);
   }
 }
 
-function renderAdminConsoleContent(data, users, view = getAdminView()) {
+function renderAdminConsoleContent(data, users, view = getAdminView(), options = {}) {
   const content = document.getElementById('adminConsoleContent');
   if (!content) return;
   const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
@@ -4382,15 +4482,18 @@ function renderAdminConsoleContent(data, users, view = getAdminView()) {
     users: `
       <section class="admin-page admin-panel admin-users-page" aria-labelledby="adminUsersTitle">
         <div class="admin-users-toolbar">
-          <div><span class="admin-kicker">USER MANAGEMENT</span><h2 id="adminUsersTitle">Danh sách người dùng</h2><p>Chọn một tài khoản để xem gói, ví demo và trạng thái truy cập.</p></div>
+          <div><span class="admin-kicker">USER MANAGEMENT</span><h2 id="adminUsersTitle">Danh sách người dùng</h2><p>Dữ liệu được phân trang và lọc trực tiếp tại Supabase để giảm tải trình duyệt.</p></div>
           <div class="admin-user-filters">
-            <label class="admin-search"><span>⌕</span><input id="adminUserSearch" type="search" placeholder="Tìm email hoặc tên..."></label>
-            <select id="adminUserStatus" aria-label="Lọc trạng thái"><option value="all">Tất cả trạng thái</option><option value="active">Đang hoạt động</option><option value="suspended">Tạm khóa</option></select>
-            <select id="adminUserPlan" aria-label="Lọc gói"><option value="all">Tất cả gói</option><option value="premium">Premium</option><option value="free">Free</option></select>
+            <label class="admin-search"><span>⌕</span><input id="adminUserSearch" type="search" value="${escapeHTML(adminUserQueryState.search)}" placeholder="Tìm email hoặc tên..."></label>
+            <select id="adminUserStatus" aria-label="Lọc trạng thái"><option value="all" ${adminUserQueryState.status === 'all' ? 'selected' : ''}>Tất cả trạng thái</option><option value="active" ${adminUserQueryState.status === 'active' ? 'selected' : ''}>Đang hoạt động</option><option value="suspended" ${adminUserQueryState.status === 'suspended' ? 'selected' : ''}>Tạm khóa</option></select>
+            <select id="adminUserPlan" aria-label="Lọc gói"><option value="all" ${adminUserQueryState.plan === 'all' ? 'selected' : ''}>Tất cả gói</option><option value="premium" ${adminUserQueryState.plan === 'premium' ? 'selected' : ''}>Premium</option><option value="free" ${adminUserQueryState.plan === 'free' ? 'selected' : ''}>Free</option></select>
           </div>
         </div>
         <div class="admin-users-layout">
-          <div class="admin-table-wrap"><table class="admin-user-table"><thead><tr><th>Người dùng</th><th>Trạng thái</th><th>Gói</th><th>Ví demo</th><th>Giao dịch</th><th>Đăng nhập gần nhất</th><th></th></tr></thead><tbody id="adminUsersBody"></tbody></table></div>
+          <div class="admin-user-table-column">
+            <div class="admin-table-wrap"><table class="admin-user-table"><thead><tr><th>Người dùng</th><th>Trạng thái</th><th>Gói</th><th>Ví demo</th><th>Giao dịch</th><th>Đăng nhập gần nhất</th><th></th></tr></thead><tbody id="adminUsersBody"></tbody></table></div>
+            <div id="adminUsersPagination" class="admin-pagination" aria-label="Phân trang người dùng"></div>
+          </div>
           <aside id="adminUserDetail" class="admin-user-detail"><div class="admin-empty-detail"><span>♙</span><strong>Chọn một người dùng</strong><p>Xem thông tin tài khoản, gói, ví và hoạt động demo.</p></div></aside>
         </div>
       </section>`,
@@ -4419,10 +4522,10 @@ function renderAdminConsoleContent(data, users, view = getAdminView()) {
   content.innerHTML = pages[safeView];
   content.dataset.adminView = safeView;
 
-  if (safeView === 'users') setupAdminUserTable(users);
+  if (safeView === 'users') setupAdminUserTable(users, data?.users || {});
   if (safeView === 'overview') drawAdminMarketChart(data?.market?.series || []);
 
-  resetRouteViewport();
+  if (!options.preserveViewport) resetRouteViewport();
 }
 
 function renderAdminDataStatus(freshness = {}, sync = {}) {
@@ -4524,6 +4627,7 @@ function startAdminSyncPolling() {
       }
       stopAdminSyncPolling();
       if (status === 'success') {
+        clearAdminClientCache();
         showToast(sync.message || 'Đồng bộ dữ liệu hoàn tất.');
         await loadAdminConsole(true);
       } else if (status === 'failed') {
@@ -4580,26 +4684,64 @@ function adminHealthRing(value, label) {
   return `<div class="admin-health-ring" style="--health:${safe * 3.6}deg"><div><strong>${safe}%</strong></div><span>${escapeHTML(label)}</span></div>`;
 }
 
-function setupAdminUserTable(users) {
+function setupAdminUserTable(users, meta = {}) {
   const search = document.getElementById('adminUserSearch');
   const status = document.getElementById('adminUserStatus');
   const plan = document.getElementById('adminUserPlan');
-  const apply = () => {
-    const needle = String(search?.value || '').trim().toLowerCase();
-    const statusValue = status?.value || 'all';
-    const planValue = plan?.value || 'all';
-    const filtered = users.filter(user => {
-      const matchesSearch = !needle || String(user.email || '').toLowerCase().includes(needle) || String(user.full_name || '').toLowerCase().includes(needle);
-      const matchesStatus = statusValue === 'all' || String(user.status || 'active') === statusValue;
-      const matchesPlan = planValue === 'all' || (planValue === 'premium' ? user.premium_active : !user.premium_active);
-      return matchesSearch && matchesStatus && matchesPlan;
-    });
-    renderAdminUsersRows(filtered);
+  const pagination = document.getElementById('adminUsersPagination');
+
+  renderAdminUsersRows(users);
+
+  const reloadUsers = ({ resetPage = false, immediate = false } = {}) => {
+    if (resetPage) adminUserQueryState.page = 1;
+    window.clearTimeout(adminUserSearchTimer);
+    const run = () => loadAdminConsole(false, 'users', { skipClientCache: true, showLoading: false, preserveViewport: true });
+    if (immediate) run();
+    else adminUserSearchTimer = window.setTimeout(run, 420);
   };
-  search?.addEventListener('input', apply);
-  status?.addEventListener('change', apply);
-  plan?.addEventListener('change', apply);
-  apply();
+
+  search?.addEventListener('input', () => {
+    adminUserQueryState.search = String(search.value || '');
+    reloadUsers({ resetPage: true });
+  });
+  search?.addEventListener('keydown', event => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    adminUserQueryState.search = String(search.value || '');
+    reloadUsers({ resetPage: true, immediate: true });
+  });
+  status?.addEventListener('change', () => {
+    adminUserQueryState.status = status.value || 'all';
+    reloadUsers({ resetPage: true, immediate: true });
+  });
+  plan?.addEventListener('change', () => {
+    adminUserQueryState.plan = plan.value || 'all';
+    reloadUsers({ resetPage: true, immediate: true });
+  });
+
+  if (pagination) {
+    const page = Math.max(1, Number(meta.page || adminUserQueryState.page || 1));
+    const pageSize = Math.max(1, Number(meta.page_size || adminUserQueryState.limit || 30));
+    const total = Math.max(0, Number(meta.total || 0));
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    adminUserQueryState.page = page;
+    adminUserQueryState.limit = pageSize;
+    pagination.innerHTML = `
+      <span>Hiển thị <b>${formatNumber(Number(meta.count || users.length), 0)}</b> / <b>${formatNumber(total, 0)}</b> tài khoản</span>
+      <div>
+        <button id="adminUsersPrev" class="admin-page-button" type="button" ${page <= 1 ? 'disabled' : ''}>← Trước</button>
+        <strong>Trang ${formatNumber(page, 0)} / ${formatNumber(totalPages, 0)}</strong>
+        <button id="adminUsersNext" class="admin-page-button" type="button" ${!meta.has_next || page >= totalPages ? 'disabled' : ''}>Tiếp →</button>
+      </div>`;
+    document.getElementById('adminUsersPrev')?.addEventListener('click', () => {
+      adminUserQueryState.page = Math.max(1, page - 1);
+      loadAdminConsole(false, 'users', { skipClientCache: true, showLoading: false, preserveViewport: true });
+    });
+    document.getElementById('adminUsersNext')?.addEventListener('click', () => {
+      adminUserQueryState.page = page + 1;
+      loadAdminConsole(false, 'users', { skipClientCache: true, showLoading: false, preserveViewport: true });
+    });
+  }
 }
 
 function renderAdminUsersRows(users) {
@@ -4660,6 +4802,7 @@ async function updateAdminUserStatus(user, nextStatus) {
       timeout: 30000
     });
     user.status = nextStatus;
+    clearAdminClientCache();
     showToast(`Đã ${action} tài khoản ${user.email}.`);
     renderAdminUsersRows(adminUsersCache);
     showAdminUserDetail(user.user_id);

@@ -8720,3 +8720,67 @@ body[data-theme="dark"] .technical-pro-p2p-box {
     min-height: 590px;
   }
 }
+
+/* Admin cache/pagination enhancements — scoped to Admin only */
+.admin-user-table-column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-pagination {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--admin-border);
+  background: rgba(9, 15, 26, .72);
+  color: var(--admin-muted);
+  font-size: .72rem;
+}
+
+.admin-pagination > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-pagination strong,
+.admin-pagination b {
+  color: var(--admin-text);
+}
+
+.admin-page-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--admin-border);
+  border-radius: 9px;
+  background: #111827;
+  color: var(--admin-text);
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.admin-page-button:hover:not(:disabled) {
+  border-color: var(--admin-peach);
+  color: var(--admin-peach);
+}
+
+.admin-page-button:disabled {
+  opacity: .38;
+  cursor: not-allowed;
+}
+
+@media (max-width: 680px) {
+  .admin-pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-pagination > div {
+    justify-content: space-between;
+  }
+}
