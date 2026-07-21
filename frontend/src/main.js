@@ -55,6 +55,7 @@ let activeRoute = '';
 let chartHours = 168;
 let p2pHours = 168;
 let tradeTerminalHours = 168;
+let tradeAmountMode = 'VND';
 let currentTradePreview = null;
 let chatMessages = [
   {
@@ -65,8 +66,6 @@ let chatMessages = [
 let orders = [];
 let currentSession = null;
 let currentUserProfile = null;
-let authAccessDeniedMessage = '';
-let lastSessionValidationAt = 0;
 let authReady = !supabaseAuth;
 let topTickerBusy = false;
 let lastTopTickerAt = 0;
@@ -121,7 +120,12 @@ document.addEventListener('click', (event) => {
     resetRouteViewport();
     app.focus({ preventScroll: true });
   }
-  if (!event.target.closest('.side-nav') && !event.target.closest('.menu-toggle')) sideNav?.classList.remove('open');
+  if (!event.target.closest('.side-nav') && !event.target.closest('.menu-toggle')) {
+    sideNav?.classList.remove('open');
+    if (document.body.classList.contains('ux-sidebar-compact')) {
+      sideNav?.querySelectorAll('[data-side-group][open]').forEach(group => group.removeAttribute('open'));
+    }
+  }
 });
 if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual';
 window.addEventListener('hashchange', route);
@@ -155,8 +159,6 @@ function applyApplicationLayout(routeName) {
   const adminMode = routeName === 'admin';
   document.documentElement.classList.toggle('admin-mode', adminMode);
   document.body.classList.toggle('admin-mode', adminMode);
-  document.documentElement.classList.toggle('user-mode', !adminMode);
-  document.body.classList.toggle('user-mode', !adminMode);
   document.title = adminMode
     ? 'BTC BigData — Admin Console'
     : 'BTC BigData Platform — Bitcoin Market Dashboard';
@@ -171,24 +173,14 @@ function applyApplicationLayout(routeName) {
 function resetRouteViewport() {
   const root = document.documentElement;
   const previousBehavior = root.style.scrollBehavior;
-  const resetAdminScroller = () => {
-    const adminMain = document.querySelector('.admin-console-main');
-    if (!adminMain) return;
-    adminMain.scrollTo({ top: 0, left: 0, behavior: 'auto' });
-    adminMain.scrollTop = 0;
-    adminMain.scrollLeft = 0;
-  };
-
   root.style.scrollBehavior = 'auto';
   window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   root.scrollTop = 0;
   document.body.scrollTop = 0;
-  resetAdminScroller();
   requestAnimationFrame(() => {
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
     root.scrollTop = 0;
     document.body.scrollTop = 0;
-    resetAdminScroller();
     root.style.scrollBehavior = previousBehavior;
   });
 }
@@ -205,7 +197,6 @@ function route() {
   activeRoute = getCurrentRouteName();
   applyApplicationLayout(activeRoute);
   resetRouteViewport();
-  if (currentSession && activeRoute !== 'login') validateSessionStatusInBackground();
   // Cho phép vào #set-password cả khi đã có mật khẩu để user có thể đổi mật khẩu.
   // Luồng bắt buộc đặt mật khẩu lần đầu vẫn được xử lý trong redirectAfterLoginIfNeeded().
   if (protectedRoutes.has(activeRoute)) {
@@ -229,6 +220,16 @@ function route() {
   document.querySelectorAll('[data-nav-group]').forEach(el => {
     const routeList = (el.dataset.routes || '').split(',').map(x => x.trim()).filter(Boolean);
     el.classList.toggle('active', routeList.includes(activeRoute));
+  });
+  document.querySelectorAll('[data-side-group]').forEach(group => {
+    const routeList = (group.dataset.routes || '').split(',').map(x => x.trim()).filter(Boolean);
+    const isActiveGroup = routeList.includes(activeRoute);
+    group.classList.toggle('active', isActiveGroup);
+    if (!document.body.classList.contains('ux-sidebar-compact')) {
+      group.open = isActiveGroup;
+    } else {
+      group.removeAttribute('open');
+    }
   });
   app.innerHTML = '';
   routes[activeRoute]();
@@ -459,10 +460,7 @@ async function fetchJson(endpoint, options = {}) {
           const err = await response.json();
           detail = err.detail || detail;
         } catch (_) { }
-        const requestError = new Error(detail);
-        requestError.status = response.status;
-        requestError.detail = detail;
-        throw requestError;
+        throw new Error(detail);
       }
       return { data: await response.json(), source: 'api' };
     } catch (error) {
@@ -2248,18 +2246,27 @@ async function loadTradeTerminal() {
             </div>
 
             <div class="card trade-order-card">
-              <div class="section-head compact"><div><h3>Order Ticket</h3><p>Nhập số tiền muốn giao dịch, hệ thống sẽ ước tính khối lượng BTC theo nguồn giá bạn chọn.</p></div></div>
+              <div class="section-head compact"><div><h3>Order Ticket</h3><p>Chọn nhập theo VNĐ hoặc BTC; hệ thống tự quy đổi hai chiều theo nguồn giá bạn chọn.</p></div></div>
               <div class="trade-side-toggle" id="tradeSideToggle">
                 <button class="active" data-side="BUY">Mua BTC</button>
                 <button data-side="SELL">Bán BTC</button>
               </div>
-              <div class="field"><label>Số tiền giao dịch (VNĐ)</label><input id="tradeAmount" type="number" value="5000000" min="10000" step="10000"></div>
-              <div class="quick-amounts" id="tradeQuickAmounts">
-                <button class="btn small secondary" data-trade-amount="1000000">1.000.000đ</button>
-                <button class="btn small secondary" data-trade-amount="5000000">5.000.000đ</button>
-                <button class="btn small secondary" data-trade-amount="10000000">10.000.000đ</button>
-                <button class="btn small secondary" data-trade-amount="50000000">50.000.000đ</button>
+              <div class="trade-amount-mode-row">
+                <span>Nhập giá trị theo</span>
+                <div class="trade-amount-mode-toggle" id="tradeAmountModeToggle" aria-label="Chọn đơn vị nhập giao dịch">
+                  <button type="button" class="${tradeAmountMode === 'VND' ? 'active' : ''}" data-trade-amount-mode="VND">VNĐ</button>
+                  <button type="button" class="${tradeAmountMode === 'BTC' ? 'active' : ''}" data-trade-amount-mode="BTC">BTC</button>
+                </div>
               </div>
+              <div class="field">
+                <label id="tradeAmountLabel">${tradeAmountMode === 'BTC' ? 'Khối lượng BTC muốn giao dịch' : 'Số tiền giao dịch (VNĐ)'}</label>
+                <div class="trade-amount-input-wrap">
+                  <input id="tradeAmount" type="number" inputmode="decimal" value="${tradeAmountMode === 'BTC' ? '0.001' : '5000000'}" min="${tradeAmountMode === 'BTC' ? '0.00000001' : '10000'}" step="${tradeAmountMode === 'BTC' ? '0.00000001' : '10000'}">
+                  <span id="tradeAmountSuffix">${tradeAmountMode}</span>
+                </div>
+                <small id="tradeAmountHint" class="trade-field-hint">${tradeAmountMode === 'BTC' ? 'Hệ thống tự quy đổi số BTC này sang VNĐ theo nguồn giá đã chọn.' : 'Hệ thống tự quy đổi số tiền này sang khối lượng BTC.'}</small>
+              </div>
+              <div class="quick-amounts" id="tradeQuickAmounts">${tradeQuickAmountsHTML(tradeAmountMode)}</div>
               <div class="field" style="margin-top:12px"><label>Nguồn tỷ giá USDT/VNĐ</label><select id="tradePriceSource"><option value="p2p">P2P (mô phỏng sát người dùng Việt Nam)</option><option value="market">Giá quốc tế quy đổi</option></select></div>
               <div id="tradeOrderPreview" class="trade-order-preview state-box empty" style="margin-top:14px">Nhấn <b>Xem trước lệnh</b> để hệ thống tính giá BTC quy đổi, khối lượng dự kiến và kiểm tra số dư ví demo.</div>
               <div class="hero-actions" style="margin-top:14px">
@@ -2301,18 +2308,32 @@ async function loadTradeTerminal() {
         await loadTradeTerminal();
       });
     });
-    document.querySelectorAll('[data-trade-amount]').forEach(btn => btn.addEventListener('click', () => {
-      document.getElementById('tradeAmount').value = btn.dataset.tradeAmount;
+    document.getElementById('tradeQuickAmounts')?.addEventListener('click', event => {
+      const btn = event.target.closest('[data-trade-amount]');
+      if (!btn) return;
+      const input = document.getElementById('tradeAmount');
+      if (input) input.value = btn.dataset.tradeAmount || '';
+      invalidateTradePreview('Giá trị đã thay đổi. Nhấn <b>Xem trước lệnh</b> để tính lại.');
+    });
+    document.querySelectorAll('[data-trade-amount-mode]').forEach(btn => btn.addEventListener('click', () => {
+      tradeAmountMode = btn.dataset.tradeAmountMode === 'BTC' ? 'BTC' : 'VND';
+      document.querySelectorAll('[data-trade-amount-mode]').forEach(item => item.classList.toggle('active', item === btn));
+      configureTradeAmountInput(true);
+      invalidateTradePreview(`Đã chuyển sang nhập theo <b>${tradeAmountMode}</b>. Nhấn <b>Xem trước lệnh</b> để quy đổi.`);
     }));
     document.querySelectorAll('#tradeSideToggle button').forEach(btn => btn.addEventListener('click', () => {
       document.querySelectorAll('#tradeSideToggle button').forEach(item => item.classList.remove('active'));
       btn.classList.add('active');
-      currentTradePreview = null;
-      const previewEl = document.getElementById('tradeOrderPreview');
-      const execBtn = document.getElementById('tradeExecuteBtn');
-      if (previewEl) previewEl.innerHTML = 'Nhấn <b>Xem trước lệnh</b> để hệ thống tính lại theo chiều giao dịch mới.';
-      if (execBtn) execBtn.disabled = true;
+      invalidateTradePreview('Nhấn <b>Xem trước lệnh</b> để hệ thống tính lại theo chiều giao dịch mới.');
     }));
+    document.getElementById('tradeAmount')?.addEventListener('input', () => invalidateTradePreview('Giá trị đã thay đổi. Nhấn <b>Xem trước lệnh</b> để tính lại.'));
+    document.getElementById('tradeAmount')?.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        previewTradeOrder();
+      }
+    });
+    document.getElementById('tradePriceSource')?.addEventListener('change', () => invalidateTradePreview('Nguồn giá đã thay đổi. Nhấn <b>Xem trước lệnh</b> để tính lại.'));
     document.getElementById('tradePreviewBtn')?.addEventListener('click', previewTradeOrder);
     document.getElementById('tradeExecuteBtn')?.addEventListener('click', executeTradeOrder);
 
@@ -2344,6 +2365,55 @@ function ageTextFromTimestamp(timestamp) {
   return `${hours} giờ trước`;
 }
 
+function tradeQuickAmountsHTML(mode = tradeAmountMode) {
+  const items = mode === 'BTC'
+    ? [
+      ['0.0001', '0,0001 BTC'],
+      ['0.001', '0,001 BTC'],
+      ['0.005', '0,005 BTC'],
+      ['0.01', '0,01 BTC']
+    ]
+    : [
+      ['1000000', '1.000.000đ'],
+      ['5000000', '5.000.000đ'],
+      ['10000000', '10.000.000đ'],
+      ['50000000', '50.000.000đ']
+    ];
+  return items.map(([value, label]) => `<button type="button" class="btn small secondary" data-trade-amount="${value}">${label}</button>`).join('');
+}
+
+function configureTradeAmountInput(resetValue = false) {
+  const input = document.getElementById('tradeAmount');
+  const label = document.getElementById('tradeAmountLabel');
+  const suffix = document.getElementById('tradeAmountSuffix');
+  const hint = document.getElementById('tradeAmountHint');
+  const quick = document.getElementById('tradeQuickAmounts');
+  if (!input) return;
+
+  const btcMode = tradeAmountMode === 'BTC';
+  input.min = btcMode ? '0.00000001' : '10000';
+  input.step = btcMode ? '0.00000001' : '10000';
+  input.placeholder = btcMode ? '0.001' : '5000000';
+  if (resetValue) input.value = btcMode ? '0.001' : '5000000';
+  if (label) label.textContent = btcMode ? 'Khối lượng BTC muốn giao dịch' : 'Số tiền giao dịch (VNĐ)';
+  if (suffix) suffix.textContent = tradeAmountMode;
+  if (hint) hint.textContent = btcMode
+    ? 'Hệ thống tự quy đổi số BTC này sang VNĐ theo nguồn giá đã chọn.'
+    : 'Hệ thống tự quy đổi số tiền này sang khối lượng BTC.';
+  if (quick) quick.innerHTML = tradeQuickAmountsHTML(tradeAmountMode);
+}
+
+function invalidateTradePreview(message = 'Nhấn <b>Xem trước lệnh</b> để hệ thống tính lại.') {
+  currentTradePreview = null;
+  const previewEl = document.getElementById('tradeOrderPreview');
+  const execBtn = document.getElementById('tradeExecuteBtn');
+  if (previewEl) {
+    previewEl.classList.add('empty');
+    previewEl.innerHTML = message;
+  }
+  if (execBtn) execBtn.disabled = true;
+}
+
 function getSelectedTradeSide() {
   return document.querySelector('#tradeSideToggle button.active')?.dataset.side || 'BUY';
 }
@@ -2372,7 +2442,8 @@ function getTradePricingContext(side, priceSource) {
 async function previewTradeOrder() {
   const previewEl = document.getElementById('tradeOrderPreview');
   const executeBtn = document.getElementById('tradeExecuteBtn');
-  const amountVnd = Number(document.getElementById('tradeAmount')?.value || 0);
+  const inputValue = Number(document.getElementById('tradeAmount')?.value || 0);
+  const inputMode = tradeAmountMode === 'BTC' ? 'BTC' : 'VND';
   const side = getSelectedTradeSide();
   const priceSource = document.getElementById('tradePriceSource')?.value || 'p2p';
   const state = window.__tradeMarketState || {};
@@ -2380,8 +2451,19 @@ async function previewTradeOrder() {
   const positionBtc = Number(state.portfolio?.position_btc || 0);
 
   if (!previewEl || !executeBtn) return;
-  if (!amountVnd || amountVnd < 10000) {
-    previewEl.innerHTML = `<div class="state-box error">Số tiền phải từ 10.000đ trở lên.</div>`;
+  previewEl.classList.remove('empty');
+  if (!Number.isFinite(inputValue) || inputValue <= 0) {
+    previewEl.innerHTML = `<div class="state-box error">Giá trị giao dịch phải lớn hơn 0.</div>`;
+    executeBtn.disabled = true;
+    return;
+  }
+  if (inputMode === 'VND' && inputValue < 10000) {
+    previewEl.innerHTML = `<div class="state-box error">Số tiền giao dịch phải từ 10.000đ trở lên.</div>`;
+    executeBtn.disabled = true;
+    return;
+  }
+  if (inputMode === 'BTC' && inputValue < 0.00000001) {
+    previewEl.innerHTML = `<div class="state-box error">Khối lượng nhỏ nhất là 0,00000001 BTC.</div>`;
     executeBtn.disabled = true;
     return;
   }
@@ -2393,8 +2475,17 @@ async function previewTradeOrder() {
     return;
   }
 
-  const amountBtc = amountVnd / pricing.appliedBtcVnd;
-  const enoughBalance = side === 'BUY' ? walletVnd >= amountVnd : positionBtc >= amountBtc;
+  let amountBtc = inputMode === 'BTC' ? inputValue : inputValue / pricing.appliedBtcVnd;
+  amountBtc = Number(amountBtc.toFixed(8));
+  let amountVnd = inputMode === 'VND' ? inputValue : amountBtc * pricing.appliedBtcVnd;
+  amountVnd = Math.round(amountVnd * 100) / 100;
+  if (amountBtc <= 0 || amountVnd <= 0) {
+    previewEl.innerHTML = `<div class="state-box error">Giá trị sau quy đổi không hợp lệ.</div>`;
+    executeBtn.disabled = true;
+    return;
+  }
+
+  const enoughBalance = side === 'BUY' ? walletVnd + 0.01 >= amountVnd : positionBtc + 1e-12 >= amountBtc;
   const compareP2p = getTradePricingContext(side, 'p2p').appliedBtcVnd;
   const compareMarket = getTradePricingContext(side, 'market').appliedBtcVnd;
   const altPrice = priceSource === 'p2p' ? compareMarket : compareP2p;
@@ -2403,6 +2494,8 @@ async function previewTradeOrder() {
   currentTradePreview = {
     side,
     priceSource,
+    inputMode,
+    inputValue,
     amountVnd,
     amountBtc,
     appliedPrice: pricing.appliedBtcVnd,
@@ -2417,16 +2510,17 @@ async function previewTradeOrder() {
 
   previewEl.innerHTML = `
     <div class="trade-preview-grid">
-      <div><span>Khối lượng ước tính</span><strong>${formatNumber(amountBtc, 8)} BTC</strong></div>
+      <div><span>Giá trị giao dịch</span><strong>${formatVND(amountVnd)}</strong></div>
+      <div><span>Khối lượng BTC</span><strong>${formatNumber(amountBtc, 8)} BTC</strong></div>
       <div><span>Giá BTC quy đổi</span><strong>${formatVND(pricing.appliedBtcVnd)}</strong></div>
-      <div><span>Giá BTC/USDT</span><strong>${formatUSD(pricing.btcUsd)}</strong></div>
       <div><span>Tỷ giá sử dụng</span><strong>${formatVND(pricing.usdtVnd)} / USDT</strong></div>
     </div>
+    <div class="trade-conversion-note">Bạn nhập <b>${inputMode === 'BTC' ? `${formatNumber(inputValue, 8)} BTC` : formatVND(inputValue)}</b> · Hệ thống quy đổi tự động sang <b>${inputMode === 'BTC' ? formatVND(amountVnd) : `${formatNumber(amountBtc, 8)} BTC`}</b>.</div>
     <div class="result-panel" style="margin-top:12px">
       <strong>${side === 'BUY' ? 'Lệnh mua BTC' : 'Lệnh bán BTC'}</strong>
-      <p>Nguồn giá: <b>${escapeHTML(pricing.rateLabel)}</b>. ${side === 'BUY' ? `Ví demo của bạn hiện có ${formatVND(walletVnd)}.` : `Danh mục hiện có ${formatNumber(positionBtc, 6)} BTC.`}</p>
+      <p>Nguồn giá: <b>${escapeHTML(pricing.rateLabel)}</b>. ${side === 'BUY' ? `Ví demo của bạn hiện có ${formatVND(walletVnd)}.` : `Danh mục hiện có ${formatNumber(positionBtc, 8)} BTC.`}</p>
       <p>${altPrice ? `So với nguồn giá còn lại, mức chênh lệch mỗi BTC là ${formatVND(Math.abs(altDiff))} (${altDiff > 0 ? 'nguồn hiện tại rẻ hơn cho người mua / lợi hơn cho người bán' : altDiff < 0 ? 'nguồn còn lại đang tốt hơn' : 'hai nguồn gần như tương đương'}).` : 'Nguồn giá thay thế chưa đủ dữ liệu để so sánh.'}</p>
-      <p class="${enoughBalance ? 'positive' : 'negative'}">${enoughBalance ? '✅ Đủ điều kiện đặt lệnh demo.' : (side === 'BUY' ? '⚠️ Số dư ví demo chưa đủ. Hãy nạp thêm tiền demo ở trang Ví.' : '⚠️ Bạn không đủ BTC mô phỏng để bán lượng này.')}</p>
+      <p class="${enoughBalance ? 'positive' : 'negative'}">${enoughBalance ? '✅ Đủ điều kiện đặt lệnh demo.' : (side === 'BUY' ? `⚠️ Ví còn thiếu ${formatVND(Math.max(0, amountVnd - walletVnd))}. Hãy nạp thêm tiền demo.` : `⚠️ Bạn còn thiếu ${formatNumber(Math.max(0, amountBtc - positionBtc), 8)} BTC để đặt lệnh bán.`)}</p>
     </div>
   `;
   executeBtn.disabled = !enoughBalance;
@@ -2454,12 +2548,13 @@ async function executeTradeOrder() {
       body: {
         side: currentTradePreview.side,
         amount_vnd: currentTradePreview.amountVnd,
+        amount_btc: currentTradePreview.amountBtc,
         amount_usdt: currentTradePreview.amountBtc,
         price_source: currentTradePreview.priceSource,
         applied_price: currentTradePreview.appliedPrice
       }
     });
-    showToast(`Đã khớp lệnh ${currentTradePreview.side} BTC demo thành công.`);
+    showToast(`Đã khớp lệnh ${currentTradePreview.side} · ${formatNumber(currentTradePreview.amountBtc, 8)} BTC · ${formatVND(currentTradePreview.amountVnd)}.`);
     await loadTradeTerminal();
   } catch (error) {
     const previewEl = document.getElementById('tradeOrderPreview');
@@ -3055,60 +3150,9 @@ function authHeader() {
   return currentSession?.access_token ? { Authorization: `Bearer ${currentSession.access_token}` } : {};
 }
 
-function readableAuthError(error) {
-  const message = String(error?.message || error || '').trim();
-  if (/banned|temporarily blocked|tạm khóa|suspended/i.test(message)) {
-    return 'Tài khoản đã bị tạm khóa. Vui lòng liên hệ quản trị viên.';
-  }
-  if (/invalid login credentials/i.test(message)) return 'Email hoặc mật khẩu không chính xác.';
-  if (/email not confirmed/i.test(message)) return 'Email chưa được xác thực.';
-  return message || 'Không xác thực được tài khoản.';
-}
-
-async function signOutBlockedAccount(message = 'Tài khoản đã bị tạm khóa. Vui lòng liên hệ quản trị viên.') {
-  authAccessDeniedMessage = message;
-  try {
-    await supabaseAuth?.auth.signOut();
-  } catch (_) { }
-  currentSession = null;
-  currentUserProfile = null;
-  renderAuthHeader();
-  showToast(message, 5200);
-}
-
 async function loadCurrentUserProfile() {
   currentUserProfile = null;
-  authAccessDeniedMessage = '';
   if (!supabaseAuth || !currentSession?.user?.id) return null;
-
-  // Backend validation is authoritative because it uses the service-role client
-  // and checks user_profiles.status even when frontend RLS/profile reads fail.
-  try {
-    const response = await fetchJson('/api/auth/me', {
-      timeout: 15000,
-      headers: { 'Cache-Control': 'no-store' }
-    });
-    const profile = response.data?.profile || {};
-    currentUserProfile = {
-      user_id: response.data?.user_id || currentSession.user.id,
-      email: response.data?.email || currentSession.user.email,
-      role: response.data?.role || profile.role || 'user',
-      status: response.data?.status || profile.status || 'active',
-      ...profile
-    };
-    lastSessionValidationAt = Date.now();
-    return currentUserProfile;
-  } catch (error) {
-    const denied = Number(error?.status) === 403 || /tạm khóa|suspended|banned/i.test(String(error?.message || ''));
-    if (denied) {
-      await signOutBlockedAccount(readableAuthError(error));
-      return null;
-    }
-    console.warn('Backend chưa xác minh được trạng thái tài khoản, thử đọc profile trực tiếp:', error.message);
-  }
-
-  // Compatibility fallback for local deployments where the new /api/auth/me
-  // endpoint has not been deployed yet. Never assume active when this read fails.
   try {
     const { data, error } = await supabaseAuth
       .from('user_profiles')
@@ -3116,34 +3160,25 @@ async function loadCurrentUserProfile() {
       .eq('user_id', currentSession.user.id)
       .maybeSingle();
     if (error) throw error;
-    currentUserProfile = data || {
-      user_id: currentSession.user.id,
-      email: currentSession.user.email,
-      role: currentSession.user.app_metadata?.role || currentSession.user.user_metadata?.role || 'user',
-      status: 'active'
-    };
+    currentUserProfile = data || null;
   } catch (error) {
     console.warn('Không đọc được user_profiles:', error.message);
-    await signOutBlockedAccount('Không xác minh được trạng thái tài khoản. Vui lòng thử đăng nhập lại sau.');
-    return null;
+    const metadataRole = currentSession.user.app_metadata?.role || currentSession.user.user_metadata?.role;
+    currentUserProfile = {
+      user_id: currentSession.user.id,
+      email: currentSession.user.email,
+      role: metadataRole === 'admin' ? 'admin' : 'user',
+      status: 'active'
+    };
   }
 
-  if (String(currentUserProfile?.status || '').toLowerCase() === 'suspended') {
-    await signOutBlockedAccount();
-    return null;
+  if (currentUserProfile?.status === 'suspended') {
+    showToast('Tài khoản đã bị tạm khóa. Vui lòng liên hệ quản trị viên.');
+    await supabaseAuth.auth.signOut();
+    currentSession = null;
+    currentUserProfile = null;
   }
-  lastSessionValidationAt = Date.now();
   return currentUserProfile;
-}
-
-async function validateSessionStatusInBackground() {
-  if (!currentSession || Date.now() - lastSessionValidationAt < 30_000) return;
-  const sessionBefore = currentSession;
-  await loadCurrentUserProfile();
-  if (sessionBefore && !currentSession && getCurrentRouteName() !== 'login') {
-    setPendingNextRoute(getCurrentRouteName());
-    location.hash = '#login';
-  }
 }
 
 function isAdmin() {
@@ -3343,29 +3378,63 @@ function installAuthUxStyles() {
     .otp-box { margin-top:14px; padding:14px; border-radius:18px; border:1px solid rgba(37,99,235,.18); background:rgba(59,130,246,.06); }
     .otp-box input { letter-spacing:.28em; font-weight:900; text-align:center; font-size:1.1rem; }
     .password-hint, .muted { color:#64748b; font-size:.92rem; }
-    .side-nav { width:min(280px, 82vw); }
-    .side-nav [data-route] { border-radius:14px; }
-    .side-nav small, .side-nav .nav-desc, .side-nav p { display:none !important; }
-    .side-nav a { min-height:40px; }
+    .side-nav { width:var(--sidebar); }
+    .side-nav [data-route] { border-radius:13px; }
+    .side-nav small:not(.side-head-copy small), .side-nav .nav-desc, .side-nav p { display:none !important; }
+    .side-nav a { min-height:38px; }
 
-    /* UI/UX compact mode: giảm chiều dài navigation, tránh phải cuộn sidebar. */
-    body.ux-sidebar-compact { --sidebar: 86px; }
-    body.ux-sidebar-compact .side-nav { width:86px; padding:12px 9px; overflow-y:visible; }
-    body.ux-sidebar-compact .side-head { margin:2px 0 10px; padding:9px 6px; border-radius:16px; text-align:center; }
-    body.ux-sidebar-compact .side-head strong { font-size:0; }
-    body.ux-sidebar-compact .side-head strong::before { content:'₿'; display:grid; place-items:center; width:38px; height:38px; margin:0 auto; border-radius:14px; background:#f7931a; color:#fff; font-size:1.25rem; }
-    body.ux-sidebar-compact .side-head span,
-    body.ux-sidebar-compact .side-label { display:none !important; }
-    body.ux-sidebar-compact .side-nav a { justify-content:center; gap:0; min-height:42px; margin:5px 0; padding:10px 0; font-size:0; border-radius:16px; }
-    body.ux-sidebar-compact .side-nav a span { display:grid; place-items:center; width:28px; height:28px; margin:0; font-size:1rem; }
-    body.ux-sidebar-compact .side-nav a:hover::after { content:attr(title); position:absolute; left:72px; z-index:120; padding:8px 10px; border-radius:12px; white-space:nowrap; background:#0f172a; color:#fff; font-size:.82rem; font-weight:800; box-shadow:0 14px 42px rgba(15,23,42,.22); }
-    .side-nav a { position:relative; }
-    .sidebar-collapse-toggle { width:100%; border:1px solid var(--border); border-radius:14px; background:#fff; color:var(--muted-2); min-height:34px; font-weight:900; margin:0 0 10px; }
-    body.ux-sidebar-compact .sidebar-collapse-toggle { height:36px; font-size:0; padding:0; }
+    /* Thanh điều hướng đã được gom nhóm; chế độ compact chỉ giữ biểu tượng và mở nhóm bằng flyout. */
+    body.ux-sidebar-compact { --sidebar: 74px; }
+    body.ux-sidebar-compact .side-nav { width:74px; padding:10px 8px; overflow-y:visible; }
+    body.ux-sidebar-compact .side-head { display:grid; grid-template-columns:1fr; margin:2px 0 8px; padding:8px; }
+    body.ux-sidebar-compact .side-head-mark { margin:0 auto !important; }
+    body.ux-sidebar-compact .side-head-copy,
+    body.ux-sidebar-compact .side-route-text,
+    body.ux-sidebar-compact .side-group-title,
+    body.ux-sidebar-compact .side-group-chevron { display:none !important; }
+    body.ux-sidebar-compact .side-nav > a,
+    body.ux-sidebar-compact .side-group > summary { justify-content:center; gap:0; min-height:42px; margin:4px 0; padding:8px; }
+    body.ux-sidebar-compact .side-nav > a > span:first-child,
+    body.ux-sidebar-compact .side-group-icon { flex-basis:28px; width:28px; height:28px; }
+    body.ux-sidebar-compact .side-group-links {
+      position:absolute;
+      top:0;
+      left:58px;
+      z-index:140;
+      width:220px;
+      margin:0;
+      padding:8px;
+      border:1px solid var(--border);
+      border-radius:15px;
+      background:var(--card);
+      box-shadow:0 20px 60px rgba(15,23,42,.18);
+    }
+    body.ux-sidebar-compact .side-group-links a { justify-content:flex-start; min-height:38px; font-size:.82rem; }
+    body.ux-sidebar-compact .side-nav > a:hover::after {
+      content:attr(title);
+      position:absolute;
+      left:58px;
+      z-index:140;
+      padding:8px 10px;
+      border-radius:11px;
+      white-space:nowrap;
+      background:#0f172a;
+      color:#fff;
+      font-size:.78rem;
+      font-weight:800;
+      box-shadow:0 14px 42px rgba(15,23,42,.22);
+    }
+    .sidebar-collapse-toggle { width:100%; border:1px solid var(--border); border-radius:12px; background:#fff; color:var(--muted-2); min-height:32px; font-weight:850; margin:0 0 8px; font-size:.78rem; }
+    body.ux-sidebar-compact .sidebar-collapse-toggle { height:34px; font-size:0; padding:0; }
     body.ux-sidebar-compact .sidebar-collapse-toggle::before { content:'☰'; font-size:1rem; }
     body:not(.ux-sidebar-compact) .sidebar-collapse-toggle::before { content:'Thu gọn '; }
     body:not(.ux-sidebar-compact) .sidebar-collapse-toggle::after { content:'←'; }
-    @media (max-height:720px) { body.ux-sidebar-compact .side-nav a { min-height:36px; margin:3px 0; } }
+    @media (max-height:720px) {
+      .side-head { display:none; }
+      .side-nav { padding-top:8px; }
+      .side-group summary, .side-nav > a { min-height:36px; }
+      .side-group-links a { min-height:32px; }
+    }
 
     /* Floating AI Messenger */
     .floating-ai-button { position:fixed; right:22px; bottom:22px; z-index:95; width:58px; height:58px; border:0; border-radius:999px; background:linear-gradient(135deg,#2563eb,#7c3aed); color:#fff; box-shadow:0 22px 55px rgba(37,99,235,.35); display:grid; place-items:center; font-size:1.35rem; }
@@ -3392,7 +3461,22 @@ function installAuthUxStyles() {
     .floating-ai-input button { border:0; border-radius:16px; padding:0 14px; background:#2563eb; color:#fff; font-weight:900; }
     body.floating-ai-open .floating-ai-button { transform:scale(.92); }
     .toast { bottom:92px; }
-    @media (max-width:720px) { .floating-ai-panel { right:10px; bottom:80px; width:calc(100vw - 20px); border-radius:22px; } .floating-ai-button { right:16px; bottom:16px; } body.ux-sidebar-compact { --sidebar:0px; } }
+    @media (max-width:720px) {
+      .floating-ai-panel { right:10px; bottom:80px; width:calc(100vw - 20px); border-radius:22px; }
+      .floating-ai-button { right:16px; bottom:16px; }
+      body.ux-sidebar-compact { --sidebar:0px; }
+      body.ux-sidebar-compact .side-nav { width:min(244px, 82vw); padding:14px 12px; overflow-y:auto; }
+      body.ux-sidebar-compact .side-head { display:grid; grid-template-columns:38px minmax(0,1fr); }
+      body.ux-sidebar-compact .side-head-copy,
+      body.ux-sidebar-compact .side-route-text,
+      body.ux-sidebar-compact .side-group-title,
+      body.ux-sidebar-compact .side-group-chevron { display:block !important; }
+      body.ux-sidebar-compact .side-group-chevron { margin-left:auto; }
+      body.ux-sidebar-compact .side-nav > a,
+      body.ux-sidebar-compact .side-group > summary { justify-content:flex-start; gap:10px; padding:9px 10px; }
+      body.ux-sidebar-compact .side-group-links { position:static; width:auto; margin:2px 0 7px 20px; padding:3px 0 3px 9px; box-shadow:none; border-width:0 0 0 1px; border-radius:0; background:transparent; }
+      body.ux-sidebar-compact .sidebar-collapse-toggle { display:none; }
+    }
 
     @media (max-width:900px) { .auth-shell { grid-template-columns:1fr; } .auth-copy { min-height:auto; } }
   `;
@@ -3549,13 +3633,27 @@ function installCompactNavigation() {
   if (!nav || nav.dataset.compactReady === '1') return;
   nav.dataset.compactReady = '1';
 
-  // Mặc định dùng compact để người dùng không phải cuộn trang bên trái.
+  // Sidebar mới đã được gom nhóm nên mặc định hiển thị đầy đủ; người dùng vẫn có thể thu gọn thành thanh biểu tượng.
   const saved = localStorage.getItem('btc_bigdata_sidebar_compact');
-  document.body.classList.toggle('ux-sidebar-compact', saved !== '0');
+  document.body.classList.toggle('ux-sidebar-compact', saved === '1');
 
   nav.querySelectorAll('a[data-route]').forEach(link => {
     const text = link.textContent.replace(/\s+/g, ' ').trim();
     if (!link.title) link.title = text;
+  });
+
+  nav.querySelectorAll('[data-side-group]').forEach(group => {
+    const summary = group.querySelector('summary');
+    const title = group.querySelector('.side-group-title')?.textContent?.trim();
+    if (summary && title) summary.title = title;
+    summary?.addEventListener('click', () => {
+      window.setTimeout(() => {
+        if (!group.open) return;
+        nav.querySelectorAll('[data-side-group]').forEach(other => {
+          if (other !== group) other.removeAttribute('open');
+        });
+      }, 0);
+    });
   });
 
   const toggle = document.createElement('button');
@@ -3567,6 +3665,11 @@ function installCompactNavigation() {
     const compact = !document.body.classList.contains('ux-sidebar-compact');
     document.body.classList.toggle('ux-sidebar-compact', compact);
     localStorage.setItem('btc_bigdata_sidebar_compact', compact ? '1' : '0');
+    nav.querySelectorAll('[data-side-group]').forEach(group => group.removeAttribute('open'));
+    if (!compact) {
+      const activeGroup = nav.querySelector('[data-side-group].active');
+      if (activeGroup) activeGroup.open = true;
+    }
     window.setTimeout(() => charts.forEach(chart => chart.resize()), 160);
   });
 
@@ -4009,17 +4112,13 @@ async function verifyEmailOtp(mode, next = 'dashboard') {
     });
 
     if (error) {
-      result.innerHTML = `<div class="state-box error">${escapeHTML(readableAuthError(error))}<br><small>Nếu mã đã hết hạn, hãy gửi lại mã OTP mới.</small></div>`;
+      result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu mã đã hết hạn, hãy gửi lại mã OTP mới.</small></div>`;
       return;
     }
 
     currentSession = data.session || null;
     await syncCurrentUserProfile();
     await loadCurrentUserProfile();
-    if (!currentSession) {
-      result.innerHTML = `<div class="state-box error">${escapeHTML(authAccessDeniedMessage || 'Tài khoản không được phép đăng nhập.')}</div>`;
-      return;
-    }
     renderAuthHeader();
     showToast('Xác thực email thành công.');
     location.hash = needsPasswordSetup() ? '#set-password' : `#${next}`;
@@ -4055,17 +4154,14 @@ async function signInWithPasswordUI(next = 'dashboard') {
     const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
 
     if (error) {
-      result.innerHTML = `<div class="state-box error">${escapeHTML(readableAuthError(error))}<br><small>Nếu bạn chưa đặt mật khẩu, hãy dùng nút gửi mã OTP qua email.</small></div>`;
+      result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu bạn chưa đặt mật khẩu, hãy dùng nút gửi mã OTP qua email.</small></div>`;
       return;
     }
 
     currentSession = data.session || null;
     await syncCurrentUserProfile();
     await loadCurrentUserProfile();
-    if (!currentSession) {
-      result.innerHTML = `<div class="state-box error">${escapeHTML(authAccessDeniedMessage || 'Tài khoản không được phép đăng nhập.')}</div>`;
-      return;
-    }
+    if (!currentSession) return;
     renderAuthHeader();
     showToast(isAdmin() ? 'Đăng nhập admin thành công.' : 'Đăng nhập thành công.');
     location.hash = isAdmin() && next === 'dashboard' ? '#admin' : (needsPasswordSetup() ? '#set-password' : `#${next}`);
@@ -4284,7 +4380,7 @@ let adminDashboardCache = null;
 let adminLoadToken = 0;
 let adminUserSearchTimer = null;
 
-const ADMIN_CLIENT_CACHE_VERSION = 'v3';
+const ADMIN_CLIENT_CACHE_VERSION = 'v2';
 const ADMIN_CLIENT_CACHE_TTL = Object.freeze({
   overview: 45_000,
   users: 60_000,
@@ -4298,11 +4394,6 @@ const adminUserQueryState = {
   status: 'all',
   plan: 'all'
 };
-const adminActivityQueryState = {
-  page: 1,
-  limit: 20,
-  type: 'all'
-};
 
 function adminClientCachePrefix() {
   return `btc_admin_cache_${ADMIN_CLIENT_CACHE_VERSION}:${currentSession?.user?.id || 'anonymous'}:`;
@@ -4310,10 +4401,6 @@ function adminClientCachePrefix() {
 
 function adminClientCacheKey(view) {
   const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
-  if (safeView === 'activity') {
-    const query = adminActivityQueryState;
-    return `${adminClientCachePrefix()}activity:${query.page}:${query.limit}:${query.type}`;
-  }
   if (safeView !== 'users') return `${adminClientCachePrefix()}${safeView}`;
   const query = adminUserQueryState;
   return `${adminClientCachePrefix()}users:${query.page}:${query.limit}:${query.status}:${query.plan}:${query.search.trim().toLowerCase()}`;
@@ -4362,11 +4449,6 @@ function adminApiEndpoint(view, force = false) {
     if (adminUserQueryState.search.trim()) params.set('search', adminUserQueryState.search.trim());
     if (adminUserQueryState.status !== 'all') params.set('status', adminUserQueryState.status);
     if (adminUserQueryState.plan !== 'all') params.set('plan', adminUserQueryState.plan);
-  }
-  if (safeView === 'activity') {
-    params.set('page', String(adminActivityQueryState.page));
-    params.set('limit', String(adminActivityQueryState.limit));
-    if (adminActivityQueryState.type !== 'all') params.set('type', adminActivityQueryState.type);
   }
   const path = safeView === 'overview' ? '/api/admin/overview' : `/api/admin/${safeView}`;
   const query = params.toString();
@@ -4543,17 +4625,8 @@ function renderAdminConsoleContent(data, users, view = getAdminView(), options =
   const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
   const summary = data?.summary || {};
   const latest = data?.market?.latest || {};
-  const marketSeries = data?.market?.series || [];
   const activity = data?.activity || [];
-  const activityPage = data?.activity_page || {};
   const system = data?.system || {};
-  const firstMarketClose = Number(marketSeries[0]?.close);
-  const latestMarketClose = Number(latest.close);
-  const marketChangePct = Number.isFinite(firstMarketClose) && firstMarketClose !== 0 && Number.isFinite(latestMarketClose)
-    ? ((latestMarketClose - firstMarketClose) / firstMarketClose) * 100
-    : 0;
-  const hasTrendData = Number.isFinite(Number(latest.ema_20)) && Number.isFinite(Number(latest.ema_50));
-  const trendLabel = !hasTrendData ? 'Chưa đủ dữ liệu xu hướng' : Number(latest.ema_20) > Number(latest.ema_50) ? 'Xu hướng ngắn hạn tăng' : 'Xu hướng ngắn hạn giảm';
 
   const marketBadge = document.getElementById('adminMarketBadge');
   if (marketBadge) marketBadge.innerHTML = `BTC/USDT <strong>${formatUSD(Number(latest.close))}</strong>`;
@@ -4576,22 +4649,9 @@ function renderAdminConsoleContent(data, users, view = getAdminView(), options =
         </div>
         <div class="admin-overview-grid">
           <article class="admin-panel admin-market-panel">
-            <div class="admin-panel-head"><div><span>THỊ TRƯỜNG</span><h2>BTC/USDT · 72 giờ</h2><p>Nến giá, EMA, Bollinger, khối lượng và RSI trên cùng một vùng phân tích.</p></div><a href="#chart">Mở biểu đồ đầy đủ →</a></div>
-            <div class="admin-market-meta admin-market-meta-rich">
-              <span>Hiện tại <b>${formatUSD(Number(latest.close))}</b></span>
-              <span class="${marketChangePct >= 0 ? 'positive' : 'negative'}">Biến động <b>${marketChangePct >= 0 ? '+' : ''}${formatNumber(marketChangePct, 2)}%</b></span>
-              <span>Low <b>${formatUSD(Number(latest.low))}</b></span>
-              <span>High <b>${formatUSD(Number(latest.high))}</b></span>
-              <span>RSI 14 <b>${formatNumber(Number(latest.rsi_14), 2)}</b></span>
-              <span>MACD <b>${formatNumber(Number(latest.macd), 2)}</b></span>
-            </div>
-            <div id="adminMarketChart" class="admin-market-chart admin-market-chart-pro"></div>
-            <div class="admin-market-insights">
-              <span><b>${trendLabel}</b><small>${hasTrendData ? `EMA20 ${Number(latest.ema_20) > Number(latest.ema_50) ? 'trên' : 'dưới'} EMA50` : 'Chờ dữ liệu EMA mới nhất'}</small></span>
-              <span><b>ATR ${formatNumber(Number(latest.atr_14), 2)}</b><small>Biên độ biến động 14 kỳ</small></span>
-              <span><b>Volume ${formatNumber(Number(latest.volume), 2)}</b><small>Khối lượng kỳ gần nhất</small></span>
-              <span><b>${latest.timestamp ? formatVNTime(latest.timestamp) : 'Chưa có dữ liệu'}</b><small>Cập nhật dữ liệu gần nhất</small></span>
-            </div>
+            <div class="admin-panel-head"><div><span>THỊ TRƯỜNG</span><h2>BTC/USDT · 72 giờ</h2></div><a href="#chart">Mở biểu đồ đầy đủ →</a></div>
+            <div class="admin-market-meta"><span>Low <b>${formatUSD(Number(latest.low))}</b></span><span>High <b>${formatUSD(Number(latest.high))}</b></span><span>EMA20 <b>${formatUSD(Number(latest.ema_20))}</b></span></div>
+            <div id="adminMarketChart" class="admin-market-chart"></div>
           </article>
           <article class="admin-panel admin-live-panel">
             <div class="admin-panel-head"><div><span>HOẠT ĐỘNG MỚI</span><h2>Người dùng đang thao tác</h2></div></div>
@@ -4629,22 +4689,7 @@ function renderAdminConsoleContent(data, users, view = getAdminView(), options =
           ${adminKpi('₫', 'Doanh thu Sandbox', formatVND(Number(summary.revenue_vnd || 0)), 'Không phải doanh thu tiền thật')}
           ${adminKpi('AI', 'Câu hỏi AI', formatNumber(Number(summary.ai_questions || 0), 0), `${formatNumber(Number(summary.active_alerts || 0), 0)} cảnh báo đang bật`)}
         </div>
-        <article class="admin-panel admin-activity-page-panel">
-          <div class="admin-panel-head admin-activity-panel-head">
-            <div><span>ACTIVITY LOG</span><h2>Hoạt động gần đây</h2><p>Danh sách được phân trang để không tải toàn bộ lịch sử cùng lúc.</p></div>
-            <label class="admin-activity-filter">
-              <span>Loại hoạt động</span>
-              <select id="adminActivityType" aria-label="Lọc loại hoạt động">
-                <option value="all" ${adminActivityQueryState.type === 'all' ? 'selected' : ''}>Tất cả</option>
-                <option value="trade" ${adminActivityQueryState.type === 'trade' ? 'selected' : ''}>Giao dịch demo</option>
-                <option value="premium" ${adminActivityQueryState.type === 'premium' ? 'selected' : ''}>Premium</option>
-                <option value="ai" ${adminActivityQueryState.type === 'ai' ? 'selected' : ''}>AI Advisor</option>
-              </select>
-            </label>
-          </div>
-          <div class="admin-activity-list">${renderAdminActivity(activity)}</div>
-          <div id="adminActivityPagination" class="admin-pagination" aria-label="Phân trang hoạt động"></div>
-        </article>
+        <article class="admin-panel admin-activity-page-panel"><div class="admin-panel-head"><div><span>ACTIVITY LOG</span><h2>Hoạt động gần đây</h2></div></div><div class="admin-activity-list">${renderAdminActivity(activity)}</div></article>
       </section>`,
     system: `
       <section class="admin-page admin-system-page" aria-labelledby="adminSystemTitle">
@@ -4659,8 +4704,7 @@ function renderAdminConsoleContent(data, users, view = getAdminView(), options =
   content.dataset.adminView = safeView;
 
   if (safeView === 'users') setupAdminUserTable(users, data?.users || {});
-  if (safeView === 'activity') setupAdminActivityPage(activityPage);
-  if (safeView === 'overview') drawAdminMarketChart(marketSeries);
+  if (safeView === 'overview') drawAdminMarketChart(data?.market?.series || []);
 
   if (!options.preserveViewport) resetRouteViewport();
 }
@@ -4881,39 +4925,6 @@ function setupAdminUserTable(users, meta = {}) {
   }
 }
 
-function setupAdminActivityPage(meta = {}) {
-  const typeSelect = document.getElementById('adminActivityType');
-  const pagination = document.getElementById('adminActivityPagination');
-  const page = Math.max(1, Number(meta.page || adminActivityQueryState.page || 1));
-  const pageSize = Math.max(1, Number(meta.page_size || adminActivityQueryState.limit || 20));
-  const total = Math.max(0, Number(meta.total || 0));
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-  adminActivityQueryState.page = Math.min(page, totalPages);
-  adminActivityQueryState.limit = pageSize;
-
-  typeSelect?.addEventListener('change', () => {
-    adminActivityQueryState.type = typeSelect.value || 'all';
-    adminActivityQueryState.page = 1;
-    loadAdminConsole(false, 'activity', { skipClientCache: false, showLoading: true });
-  });
-
-  if (!pagination) return;
-  pagination.innerHTML = `
-    <button id="adminActivityPrev" class="admin-page-button" type="button" ${page <= 1 ? 'disabled' : ''}>← Trước</button>
-    <div><strong>Trang ${formatNumber(page, 0)} / ${formatNumber(totalPages, 0)}</strong><span>${formatNumber(total, 0)} hoạt động</span></div>
-    <button id="adminActivityNext" class="admin-page-button" type="button" ${!meta.has_next || page >= totalPages ? 'disabled' : ''}>Tiếp →</button>`;
-
-  document.getElementById('adminActivityPrev')?.addEventListener('click', () => {
-    adminActivityQueryState.page = Math.max(1, page - 1);
-    loadAdminConsole(false, 'activity', { showLoading: true });
-  });
-  document.getElementById('adminActivityNext')?.addEventListener('click', () => {
-    adminActivityQueryState.page = Math.min(totalPages, page + 1);
-    loadAdminConsole(false, 'activity', { showLoading: true });
-  });
-}
-
 function renderAdminUsersRows(users) {
   const body = document.getElementById('adminUsersBody');
   if (!body) return;
@@ -4987,94 +4998,22 @@ function drawAdminMarketChart(rows) {
   if (!el || !window.echarts || !rows?.length) return;
   const chart = echarts.init(el);
   charts.push(chart);
-
   const labels = rows.map(row => formatVNTime(row.timestamp, 'short'));
-  const volumes = rows.map(row => ({
-    value: Number(row.volume || 0),
-    itemStyle: { color: Number(row.close) >= Number(row.open) ? 'rgba(32,213,164,.55)' : 'rgba(255,127,140,.55)' }
-  }));
-  const textColor = document.documentElement.classList.contains('dark') ? '#cbd5e1' : '#64748b';
-  const gridColor = document.documentElement.classList.contains('dark') ? 'rgba(148,163,184,.12)' : 'rgba(100,116,139,.13)';
-
   chart.setOption({
     animation: false,
     backgroundColor: 'transparent',
-    axisPointer: { link: [{ xAxisIndex: 'all' }] },
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'cross' },
-      backgroundColor: 'rgba(15,23,42,.96)',
-      borderColor: 'rgba(148,163,184,.25)',
-      textStyle: { color: '#f8fafc' },
-      formatter(params) {
-        const index = params?.[0]?.dataIndex ?? 0;
-        const row = rows[index] || {};
-        return [
-          `<b>${escapeHTML(formatVNTime(row.timestamp))}</b>`,
-          `Mở: ${formatUSD(Number(row.open))}`,
-          `Cao: ${formatUSD(Number(row.high))}`,
-          `Thấp: ${formatUSD(Number(row.low))}`,
-          `Đóng: ${formatUSD(Number(row.close))}`,
-          `Volume: ${formatNumber(Number(row.volume), 2)}`,
-          `RSI: ${formatNumber(Number(row.rsi_14), 2)}`
-        ].join('<br>');
-      }
-    },
-    legend: {
-      top: 2,
-      right: 8,
-      textStyle: { color: textColor },
-      selected: { 'BB Upper': false, 'BB Lower': false },
-      data: ['OHLC', 'EMA20', 'EMA50', 'EMA200', 'BB Upper', 'BB Lower']
-    },
-    grid: [
-      { left: 58, right: 28, top: 44, height: '42%' },
-      { left: 58, right: 28, top: '53%', height: '9%' },
-      { left: 58, right: 28, top: '66%', height: '9%' },
-      { left: 58, right: 28, top: '79%', height: '10%' }
-    ],
-    xAxis: [
-      { type: 'category', data: labels, boundaryGap: true, axisLabel: { show: false }, axisLine: { lineStyle: { color: gridColor } }, splitLine: { show: false } },
-      { type: 'category', gridIndex: 1, data: labels, boundaryGap: true, axisLabel: { show: false }, axisLine: { lineStyle: { color: gridColor } }, splitLine: { show: false } },
-      { type: 'category', gridIndex: 2, data: labels, boundaryGap: true, axisLabel: { show: false }, axisLine: { lineStyle: { color: gridColor } }, splitLine: { show: false } },
-      { type: 'category', gridIndex: 3, data: labels, boundaryGap: true, axisLabel: { color: textColor, hideOverlap: true }, axisLine: { lineStyle: { color: gridColor } }, splitLine: { show: false } }
-    ],
-    yAxis: [
-      { scale: true, axisLabel: { color: textColor, formatter: value => `$${Math.round(value / 1000)}k` }, splitLine: { lineStyle: { color: gridColor } } },
-      { gridIndex: 1, scale: true, axisLabel: { color: textColor, formatter: value => Number(value).toLocaleString('en-US', { notation: 'compact' }) }, splitLine: { show: false } },
-      { gridIndex: 2, min: 0, max: 100, interval: 50, axisLabel: { color: textColor }, splitLine: { lineStyle: { color: gridColor } } },
-      { gridIndex: 3, scale: true, axisLabel: { color: textColor, formatter: value => Number(value).toFixed(0) }, splitLine: { lineStyle: { color: gridColor } } }
-    ],
-    dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1, 2, 3], start: 15, end: 100 },
-      { type: 'slider', xAxisIndex: [0, 1, 2, 3], bottom: 0, height: 18, start: 15, end: 100, borderColor: 'transparent', textStyle: { color: textColor } }
-    ],
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    legend: { top: 4, right: 8, textStyle: { color: '#b9c1d3' }, data: ['OHLC', 'EMA20', 'EMA50'] },
+    grid: { left: 48, right: 24, top: 42, bottom: 36 },
+    xAxis: { type: 'category', data: labels, boundaryGap: true, axisLabel: { color: '#75809a', hideOverlap: true }, axisLine: { lineStyle: { color: '#263044' } } },
+    yAxis: { scale: true, axisLabel: { color: '#75809a', formatter: value => `$${Math.round(value / 1000)}k` }, splitLine: { lineStyle: { color: 'rgba(117,128,154,.12)' } } },
+    dataZoom: [{ type: 'inside', start: 25, end: 100 }],
     series: [
       { name: 'OHLC', type: 'candlestick', data: rows.map(row => [row.open, row.close, row.low, row.high]), itemStyle: { color: '#20d5a4', color0: '#ff7f8c', borderColor: '#20d5a4', borderColor0: '#ff7f8c' } },
-      { name: 'EMA20', type: 'line', data: rows.map(row => row.ema_20), showSymbol: false, smooth: true, lineStyle: { width: 1.8, color: '#ffb873' } },
-      { name: 'EMA50', type: 'line', data: rows.map(row => row.ema_50), showSymbol: false, smooth: true, lineStyle: { width: 1.5, color: '#5dc9ff' } },
-      { name: 'EMA200', type: 'line', data: rows.map(row => row.ema_200), showSymbol: false, smooth: true, lineStyle: { width: 1.35, color: '#a78bfa' } },
-      { name: 'BB Upper', type: 'line', data: rows.map(row => row.bb_upper), showSymbol: false, lineStyle: { width: 1, type: 'dashed', color: '#94a3b8' } },
-      { name: 'BB Lower', type: 'line', data: rows.map(row => row.bb_lower), showSymbol: false, lineStyle: { width: 1, type: 'dashed', color: '#94a3b8' } },
-      { name: 'Khối lượng', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volumes, barMaxWidth: 9 },
-      {
-        name: 'RSI 14', type: 'line', xAxisIndex: 2, yAxisIndex: 2, data: rows.map(row => row.rsi_14), showSymbol: false, lineStyle: { width: 1.7, color: '#f7931a' },
-        markLine: { silent: true, symbol: 'none', label: { show: false }, data: [
-          { yAxis: 30, lineStyle: { color: '#38bdf8', type: 'dashed', opacity: .65 } },
-          { yAxis: 70, lineStyle: { color: '#ef4444', type: 'dashed', opacity: .65 } }
-        ] }
-      },
-      {
-        name: 'MACD Hist', type: 'bar', xAxisIndex: 3, yAxisIndex: 3, barMaxWidth: 8,
-        data: rows.map(row => ({
-          value: Number(row.macd_hist || 0),
-          itemStyle: { color: Number(row.macd_hist || 0) >= 0 ? 'rgba(32,213,164,.62)' : 'rgba(255,127,140,.62)' }
-        }))
-      },
-      { name: 'MACD', type: 'line', xAxisIndex: 3, yAxisIndex: 3, data: rows.map(row => row.macd), showSymbol: false, lineStyle: { width: 1.35, color: '#5dc9ff' } },
-      { name: 'Signal', type: 'line', xAxisIndex: 3, yAxisIndex: 3, data: rows.map(row => row.macd_signal), showSymbol: false, lineStyle: { width: 1.25, color: '#ffb873' } }
+      { name: 'EMA20', type: 'line', data: rows.map(row => row.ema_20), showSymbol: false, smooth: true, lineStyle: { width: 1.7, color: '#ffb873' } },
+      { name: 'EMA50', type: 'line', data: rows.map(row => row.ema_50), showSymbol: false, smooth: true, lineStyle: { width: 1.4, color: '#5dc9ff' } }
     ]
-  }, true);
+  });
 }
 
 function renderSettlementPage() {

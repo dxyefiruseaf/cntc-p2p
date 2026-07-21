@@ -144,6 +144,24 @@ def create_demo_trade(row: dict[str, Any]) -> dict[str, Any] | None:
     return res.data[0] if res.data else None
 
 
+def delete_demo_trade(trade_id: str, user_id: str) -> bool:
+    """Best-effort rollback helper when wallet settlement fails."""
+    sb = _client()
+    if sb is None:
+        return False
+    try:
+        res = (
+            sb.table(DEMO_TRADES_TABLE)
+            .delete()
+            .eq("id", trade_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        return False
+
+
 def list_demo_trades(user_id: str, limit: int = 50) -> list[dict[str, Any]]:
     sb = _client()
     if sb is None:
@@ -389,15 +407,22 @@ def debit_wallet_for_payment(user_id: str, amount_vnd: int | float, description:
     new_balance = current - amount
     updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
     sb.table(WALLETS_TABLE).update({"balance_vnd": new_balance, "updated_at": updated_at}).eq("user_id", user_id).execute()
-    tx = _insert_wallet_transaction({
-        "user_id": user_id,
-        "type": "payment",
-        "amount_vnd": -amount,
-        "balance_after_vnd": new_balance,
-        "description": description,
-        "ref_id": ref_id,
-    })
-    return {"wallet": get_wallet_for_user(user_id), "transaction": tx}
+    tx = None
+    try:
+        tx = _insert_wallet_transaction({
+            "user_id": user_id,
+            "type": "payment",
+            "amount_vnd": -amount,
+            "balance_after_vnd": new_balance,
+            "description": description,
+            "ref_id": ref_id,
+        })
+    except Exception:
+        # The wallet balance is the source of truth for this demo flow. A log
+        # insert must not turn an otherwise successful trade into HTTP 500.
+        tx = None
+    wallet_after = {**wallet, "balance_vnd": new_balance, "updated_at": updated_at}
+    return {"wallet": wallet_after, "transaction": tx}
 
 
 def credit_wallet_balance(user_id: str, amount_vnd: int | float, description: str, ref_id: str | None = None) -> dict[str, Any]:
@@ -411,15 +436,23 @@ def credit_wallet_balance(user_id: str, amount_vnd: int | float, description: st
     new_balance = current + amount
     updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
     sb.table(WALLETS_TABLE).update({"balance_vnd": new_balance, "updated_at": updated_at}).eq("user_id", user_id).execute()
-    tx = _insert_wallet_transaction({
-        "user_id": user_id,
-        "type": "trade_credit",
-        "amount_vnd": amount,
-        "balance_after_vnd": new_balance,
-        "description": description,
-        "ref_id": ref_id,
-    })
-    return {"wallet": get_wallet_for_user(user_id), "transaction": tx}
+    tx = None
+    try:
+        tx = _insert_wallet_transaction({
+            "user_id": user_id,
+            # Existing databases only allow topup/payment/refund/adjustment.
+            # Use adjustment for SELL proceeds and keep the exact meaning in
+            # description instead of violating the CHECK constraint.
+            "type": "adjustment",
+            "amount_vnd": amount,
+            "balance_after_vnd": new_balance,
+            "description": description,
+            "ref_id": ref_id,
+        })
+    except Exception:
+        tx = None
+    wallet_after = {**wallet, "balance_vnd": new_balance, "updated_at": updated_at}
+    return {"wallet": wallet_after, "transaction": tx}
 
 
 def summarize_demo_trades(user_id: str, limit: int = 500) -> dict[str, Any]:
@@ -495,18 +528,18 @@ def execute_demo_trade(
         raise ValueError("Giá trị giao dịch mô phỏng không hợp lệ")
 
     portfolio_before = summarize_demo_trades(user_id)
+    wallet_before = get_wallet_for_user(user_id)
 
-    if side_norm == "BUY":
-        debit_wallet_for_payment(user_id, gross_vnd, f"Mua BTC demo · {amount_btc:.8f} BTC", None)
-    else:
-        if _num(portfolio_before.get("position_btc")) + 1e-12 < amount_btc:
-            raise ValueError("Số dư BTC demo không đủ để thực hiện lệnh bán")
-        credit_wallet_balance(user_id, gross_vnd, f"Bán BTC demo · {amount_btc:.8f} BTC", None)
+    if side_norm == "BUY" and _num(wallet_before.get("balance_vnd")) + 1e-9 < gross_vnd:
+        raise ValueError("Số dư ví demo không đủ")
+    if side_norm == "SELL" and _num(portfolio_before.get("position_btc")) + 1e-12 < amount_btc:
+        raise ValueError("Số dư BTC demo không đủ để thực hiện lệnh bán")
 
     created = create_demo_trade({
         "user_id": user_id,
         "side": side_norm.lower(),
         "amount_vnd": gross_vnd,
+        # Legacy column name; the value stored here is BTC quantity.
         "amount_usdt": amount_btc,
         "price_source": price_source,
         "applied_price": _num(applied_price),
@@ -514,8 +547,31 @@ def execute_demo_trade(
     if not created:
         return None
 
+    trade_id = str(created.get("id") or "")
+    try:
+        if side_norm == "BUY":
+            settlement = debit_wallet_for_payment(
+                user_id, gross_vnd, f"Mua BTC demo · {amount_btc:.8f} BTC", trade_id or None
+            )
+        else:
+            settlement = credit_wallet_balance(
+                user_id, gross_vnd, f"Bán BTC demo · {amount_btc:.8f} BTC", trade_id or None
+            )
+    except Exception:
+        if trade_id:
+            delete_demo_trade(trade_id, user_id)
+        raise
+
+    try:
+        portfolio_after = summarize_demo_trades(user_id)
+    except Exception:
+        # The trade and wallet settlement already succeeded. Do not return an
+        # error only because the optional summary refresh is temporarily down.
+        portfolio_after = {}
+
     return {
         **created,
-        "wallet": get_wallet_for_user(user_id),
-        "portfolio": summarize_demo_trades(user_id),
+        "amount_btc": amount_btc,
+        "wallet": settlement.get("wallet") or {},
+        "portfolio": portfolio_after,
     }

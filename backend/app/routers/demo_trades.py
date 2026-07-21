@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -7,11 +9,15 @@ from app.auth import get_current_user
 from app.repositories.market_repository import execute_demo_trade, list_demo_trades, summarize_demo_trades
 
 router = APIRouter(prefix="/api/demo-trades", tags=["demo-trades"])
+logger = logging.getLogger(__name__)
 
 
 class DemoTradeCreate(BaseModel):
     side: str = Field(..., pattern="^(BUY|SELL|buy|sell)$")
     amount_vnd: float = Field(..., gt=0)
+    # `amount_usdt` is the legacy database/API field. Both fields represent
+    # BTC quantity; accepting `amount_btc` makes the client contract clear.
+    amount_btc: float | None = Field(None, gt=0)
     amount_usdt: float | None = Field(None, gt=0)
     price_source: str = Field("p2p", pattern="^(p2p|market)$")
     applied_price: float | None = Field(None, gt=0)
@@ -20,7 +26,7 @@ class DemoTradeCreate(BaseModel):
 @router.post("")
 async def create_trade(payload: DemoTradeCreate, request: Request):
     user = get_current_user(request)
-    amount_asset = float(payload.amount_usdt or 0)
+    amount_asset = float(payload.amount_btc or payload.amount_usdt or 0)
     if amount_asset <= 0:
         raise HTTPException(status_code=400, detail="Khối lượng BTC mô phỏng phải lớn hơn 0")
 
@@ -35,6 +41,12 @@ async def create_trade(payload: DemoTradeCreate, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Không thể thực hiện giao dịch demo cho user=%s", user.get("id"))
+        raise HTTPException(
+            status_code=503,
+            detail="Không thể ghi giao dịch demo. Vui lòng thử lại hoặc kiểm tra cấu hình Supabase.",
+        ) from exc
 
     if not result:
         raise HTTPException(status_code=503, detail="Không lưu được giao dịch demo")
