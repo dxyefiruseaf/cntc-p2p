@@ -64,12 +64,16 @@ let chatMessages = [
 ];
 let orders = [];
 let currentSession = null;
+let currentUserProfile = null;
 let authReady = !supabaseAuth;
 let topTickerBusy = false;
 let lastTopTickerAt = 0;
 let liveNewsTickerBusy = false;
 let passwordSavingInProgress = false;
-const protectedRoutes = new Set(['history', 'alerts', 'billing', 'wallet', 'set-password', 'account', 'decision', 'trade', 'settlement']);
+let chatSending = false;
+let floatingChatSending = false;
+let adminSyncPollTimer = null;
+const protectedRoutes = new Set(['history', 'alerts', 'billing', 'wallet', 'set-password', 'account', 'decision', 'trade', 'settlement', 'admin']);
 const trustRoutes = new Set(['dashboard', 'chart', 'p2p', 'tax', 'settlement', 'chat', 'risk', 'news', 'reliability', 'decision']);
 
 const signalMap = {
@@ -102,14 +106,22 @@ const routes = {
   login: renderLoginPage,
   'set-password': renderSetPasswordPage,
   account: renderAccountPage,
+  admin: renderAdminPage,
   about: renderAboutPage,
   'payment-result': renderPaymentResultPage
 };
 
 menuToggle?.addEventListener('click', () => sideNav?.classList.toggle('open'));
 document.addEventListener('click', (event) => {
+  const routeLink = event.target.closest('a[data-route]');
+  if (routeLink?.dataset.route === getCurrentRouteName()) {
+    event.preventDefault();
+    resetRouteViewport();
+    app.focus({ preventScroll: true });
+  }
   if (!event.target.closest('.side-nav') && !event.target.closest('.menu-toggle')) sideNav?.classList.remove('open');
 });
+if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual';
 window.addEventListener('hashchange', route);
 window.addEventListener('resize', () => charts.forEach(chart => chart.resize()));
 topTicker?.addEventListener('click', () => {
@@ -137,10 +149,48 @@ function getCurrentRouteName() {
   return routes[name] ? name : 'theory';
 }
 
+function applyApplicationLayout(routeName) {
+  const adminMode = routeName === 'admin';
+  document.documentElement.classList.toggle('admin-mode', adminMode);
+  document.body.classList.toggle('admin-mode', adminMode);
+  document.title = adminMode
+    ? 'BTC BigData — Admin Console'
+    : 'BTC BigData Platform — Bitcoin Market Dashboard';
+
+  if (adminMode) {
+    sideNav?.classList.remove('open');
+    document.getElementById('floatingAIPanel')?.classList.remove('open');
+    document.body.classList.remove('floating-ai-open');
+  }
+}
+
+function resetRouteViewport() {
+  const root = document.documentElement;
+  const previousBehavior = root.style.scrollBehavior;
+  root.style.scrollBehavior = 'auto';
+  window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  root.scrollTop = 0;
+  document.body.scrollTop = 0;
+  requestAnimationFrame(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    root.scrollTop = 0;
+    document.body.scrollTop = 0;
+    root.style.scrollBehavior = previousBehavior;
+  });
+}
+
+function stopAdminSyncPolling() {
+  if (adminSyncPollTimer) window.clearTimeout(adminSyncPollTimer);
+  adminSyncPollTimer = null;
+}
+
 function route() {
   document.querySelector('#tradeDetailModal [data-close-trade-detail]')?.click();
   disposeCharts();
+  stopAdminSyncPolling();
   activeRoute = getCurrentRouteName();
+  applyApplicationLayout(activeRoute);
+  resetRouteViewport();
   // Cho phép vào #set-password cả khi đã có mật khẩu để user có thể đổi mật khẩu.
   // Luồng bắt buộc đặt mật khẩu lần đầu vẫn được xử lý trong redirectAfterLoginIfNeeded().
   if (protectedRoutes.has(activeRoute)) {
@@ -154,6 +204,11 @@ function route() {
       location.hash = `#login?next=${encodeURIComponent(activeRoute)}`;
       return;
     }
+  }
+  if (activeRoute === 'admin' && !isAdmin()) {
+    showToast('Chỉ tài khoản admin được phép mở khu vực quản trị.');
+    location.hash = '#dashboard';
+    return;
   }
   document.querySelectorAll('[data-route]').forEach(el => el.classList.toggle('active', el.dataset.route === activeRoute));
   document.querySelectorAll('[data-nav-group]').forEach(el => {
@@ -956,34 +1011,322 @@ function bindDashboardConverter({ btcUsd, buyRate, sellRate }) {
 
 async function renderChartPage() {
   app.innerHTML = `
-    <section class="page-head">
-      <div><span class="eyebrow">Biểu đồ kỹ thuật</span><h1>OHLCV, EMA, RSI và MACD</h1><p class="lead">Trang phục vụ phần demo frontend: đổi khung thời gian sẽ gọi lại <code>/api/ohlcv?hours=N</code>.</p></div>
-      <div class="segmented" id="chartHours">
-        <button data-hours="24">24H</button><button data-hours="168">7 ngày</button><button data-hours="720">30 ngày</button>
-      </div>
-    </section>
-    <section id="chartContent">${loadingCard(620)}</section>
+    <div class="technical-pro-page">
+      <section class="page-head technical-pro-page-head">
+        <div class="technical-pro-title-wrap">
+          <span class="eyebrow">Phân tích kỹ thuật</span>
+          <h1>BTC/USDT Market Terminal</h1>
+          <p class="lead">Theo dõi nến 1 giờ, xu hướng EMA, Bollinger Bands, khối lượng, RSI, Stochastic và MACD trong một màn hình.</p>
+        </div>
+        <div class="technical-pro-head-actions">
+          <div class="segmented technical-pro-timeframe" id="chartHours" aria-label="Chọn khung dữ liệu">
+            <button data-hours="24">24H</button>
+            <button data-hours="168">7 ngày</button>
+            <button data-hours="720">30 ngày</button>
+          </div>
+          <button class="btn secondary technical-pro-refresh" id="technicalRefresh" type="button" title="Tải lại dữ liệu">↻ Làm mới</button>
+        </div>
+      </section>
+      <section id="chartContent">${loadingCard(680)}</section>
+    </div>
   `;
+
   document.querySelectorAll('#chartHours button').forEach(btn => {
     btn.classList.toggle('active', Number(btn.dataset.hours) === chartHours);
-    btn.addEventListener('click', () => { chartHours = Number(btn.dataset.hours); renderChartPage(); });
+    btn.addEventListener('click', () => {
+      const nextHours = Number(btn.dataset.hours);
+      if (nextHours === chartHours) {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
+      chartHours = nextHours;
+      renderChartPage();
+    });
   });
+  document.getElementById('technicalRefresh')?.addEventListener('click', renderChartPage);
+
   try {
     const [res, p2pRes] = await Promise.all([
       fetchJson(`/api/ohlcv?hours=${chartHours}`),
       fetchJson(`/api/p2p-spread?hours=${chartHours}`, { timeout: 30000 })
     ]);
+
+    const rows = normalizeTechnicalRows(res.data.data || []);
+    if (!rows.length) {
+      document.getElementById('chartContent').innerHTML = `<div class="state-box empty">Chưa có dữ liệu OHLCV để hiển thị biểu đồ kỹ thuật.</div>`;
+      return;
+    }
+
+    const p2pRows = Array.isArray(p2pRes.data?.data) ? p2pRes.data.data : [];
+    const snapshot = buildTechnicalSnapshot(rows, p2pRows, chartHours);
+    const movementClass = snapshot.periodChange >= 0 ? 'positive' : 'negative';
+    const movementIcon = snapshot.periodChange >= 0 ? '↗' : '↘';
+
     document.getElementById('chartContent').innerHTML = `
-      <div class="card">
-        <div class="section-head"><div><h2>BTC/USDT + Giá BTC theo P2P · ${chartHours} giờ gần nhất</h2><p>Số nến: ${res.data.count} · OHLCV ${sourcePill(res.source)} · P2P ${sourcePill(p2pRes.source)}. Hai đường P2P được quy đổi: <code>giá BTC/USDT × giá USDT/VNĐ P2P</code>.</p></div></div>
-        <div id="technicalChart" class="chart-box large"></div>
-        <p class="chart-note">Đường nến vẫn là BTC/USDT theo USD. Hai đường P2P dùng trục VNĐ bên phải để thể hiện giá mua/bán Bitcoin ước tính qua thị trường P2P.</p>
-      </div>
+      <section class="technical-pro-market-grid">
+        <article class="technical-pro-price-card">
+          <div class="technical-pro-price-topline">
+            <div class="technical-pro-symbol">
+              <span class="technical-pro-btc-mark">₿</span>
+              <div><strong>BTC/USDT</strong><span>Bitcoin · Nến 1 giờ</span></div>
+            </div>
+            <span class="technical-pro-live"><i></i>Dữ liệu ${sourcePill(res.source)}</span>
+          </div>
+          <div class="technical-pro-price-value">${formatUSD(snapshot.close)}</div>
+          <div class="technical-pro-price-change ${movementClass}">
+            <strong>${movementIcon} ${formatPct(snapshot.periodChange)}</strong>
+            <span>${snapshot.periodLabel} · ${formatUSD(snapshot.absoluteChange)}</span>
+          </div>
+          <div class="technical-pro-price-meta">
+            <span>Nến mới nhất <b>${formatVNTime(snapshot.timestamp)}</b></span>
+            <span>${rows.length} điểm dữ liệu</span>
+          </div>
+        </article>
+
+        <div class="technical-pro-kpi-grid">
+          ${technicalMetricCard('Cao nhất', formatUSD(snapshot.high), `Biên độ ${formatPct(snapshot.rangePct, 2, false)}`, 'high')}
+          ${technicalMetricCard('Thấp nhất', formatUSD(snapshot.low), `Khoảng giá ${formatUSD(snapshot.high - snapshot.low)}`, 'low')}
+          ${technicalMetricCard('Khối lượng', formatNumber(snapshot.volume, 2), 'BTC trong khung đã chọn', 'volume')}
+          ${technicalMetricCard('ATR 14', formatUSD(snapshot.atr), `${formatPct(snapshot.atrPct, 2, false)} giá hiện tại`, 'atr')}
+        </div>
+      </section>
+
+      <section class="technical-pro-workspace">
+        <article class="technical-pro-chart-card">
+          <div class="technical-pro-card-head">
+            <div>
+              <span class="technical-pro-kicker">BIỂU ĐỒ ĐA CHỈ BÁO</span>
+              <h2>Giá, khối lượng và động lượng</h2>
+              <p>Di chuột để xem OHLC; kéo thanh dưới biểu đồ để phóng to một giai đoạn.</p>
+            </div>
+            <div class="technical-pro-chart-actions">
+              <button type="button" class="technical-pro-tool active" data-tech-group="ema">EMA</button>
+              <button type="button" class="technical-pro-tool active" data-tech-group="bollinger">Bollinger</button>
+              <button type="button" class="technical-pro-tool" data-tech-group="p2p" ${snapshot.hasP2P ? '' : 'disabled'}>P2P VNĐ</button>
+              <button type="button" class="technical-pro-tool" id="technicalResetZoom">Đặt lại</button>
+            </div>
+          </div>
+          <div class="technical-pro-chart-key">
+            <span><i class="up"></i>Nến tăng</span>
+            <span><i class="down"></i>Nến giảm</span>
+            <span><i class="ema20"></i>EMA20</span>
+            <span><i class="ema50"></i>EMA50</span>
+            <span><i class="ema200"></i>EMA200</span>
+          </div>
+          <div id="technicalProChart" class="technical-pro-chart" role="img" aria-label="Biểu đồ kỹ thuật BTC USDT"></div>
+          <div class="technical-pro-chart-footer">
+            <span>OHLCV ${sourcePill(res.source)}</span>
+            <span>P2P ${sourcePill(p2pRes.source)}</span>
+            <span>Cập nhật: ${formatVNTime(snapshot.timestamp)}</span>
+          </div>
+        </article>
+
+        <aside class="technical-pro-analysis-card">
+          <div class="technical-pro-analysis-head">
+            <div><span class="technical-pro-kicker">TỔNG HỢP TÍN HIỆU</span><h2>Trạng thái thị trường</h2></div>
+            <span class="technical-pro-bias ${snapshot.biasClass}">${snapshot.biasLabel}</span>
+          </div>
+          <div class="technical-pro-score">
+            <div class="technical-pro-score-ring" style="--score:${snapshot.score}">
+              <strong>${snapshot.score}</strong><span>/100</span>
+            </div>
+            <div><b>${snapshot.biasTitle}</b><p>${snapshot.biasDescription}</p></div>
+          </div>
+
+          <div class="technical-pro-signal-list">
+            ${technicalSignalRow('Xu hướng EMA', snapshot.trendLabel, snapshot.trendTone, snapshot.trendNote)}
+            ${technicalSignalRow('Động lượng RSI', snapshot.rsiLabel, snapshot.rsiTone, `RSI 14: ${formatNumber(snapshot.rsi, 1)}`)}
+            ${technicalSignalRow('MACD', snapshot.macdLabel, snapshot.macdTone, `Histogram: ${formatNumber(snapshot.macdHist, 2)}`)}
+            ${technicalSignalRow('Stochastic', snapshot.stochLabel, snapshot.stochTone, `K ${formatNumber(snapshot.stochK, 1)} · D ${formatNumber(snapshot.stochD, 1)}`)}
+          </div>
+
+          <div class="technical-pro-levels">
+            <div><span>Kháng cự gần</span><strong>${formatUSD(snapshot.resistance)}</strong><small>${formatPct(snapshot.resistanceDistance, 2)} so với giá</small></div>
+            <div><span>Hỗ trợ gần</span><strong>${formatUSD(snapshot.support)}</strong><small>${formatPct(snapshot.supportDistance, 2)} so với giá</small></div>
+          </div>
+
+          <div class="technical-pro-p2p-box ${snapshot.hasP2P ? '' : 'muted'}">
+            <div class="technical-pro-p2p-head"><span>Quy đổi BTC qua P2P</span><b>${snapshot.hasP2P ? 'VNĐ' : 'Chưa có dữ liệu'}</b></div>
+            <div><span>Ước tính mua</span><strong>${formatVND(snapshot.p2pBuyBtc)}</strong></div>
+            <div><span>Ước tính bán</span><strong>${formatVND(snapshot.p2pSellBtc)}</strong></div>
+            <small>Giá BTC/USDT × tỷ giá USDT/VNĐ mới nhất.</small>
+          </div>
+        </aside>
+      </section>
+
+      <section class="technical-pro-indicator-grid">
+        ${technicalIndicatorCard('RSI 14', formatNumber(snapshot.rsi, 1), snapshot.rsiLabel, snapshot.rsiTone, clampPercent(snapshot.rsi), '30 quá bán · 70 quá mua')}
+        ${technicalIndicatorCard('MACD', formatNumber(snapshot.macd, 2), snapshot.macdLabel, snapshot.macdTone, snapshot.macdGauge, `Signal ${formatNumber(snapshot.macdSignal, 2)}`)}
+        ${technicalIndicatorCard('Stochastic', formatNumber(snapshot.stochK, 1), snapshot.stochLabel, snapshot.stochTone, clampPercent(snapshot.stochK), `K ${formatNumber(snapshot.stochK, 1)} · D ${formatNumber(snapshot.stochD, 1)}`)}
+        ${technicalIndicatorCard('Bollinger', formatPct(snapshot.bbPosition, 1, false), snapshot.bbLabel, snapshot.bbTone, clampPercent(snapshot.bbPosition), `Độ rộng ${formatPct(snapshot.bbWidth, 2, false)}`)}
+        ${technicalIndicatorCard('EMA 20/50', formatUSD(snapshot.ema20), snapshot.trendLabel, snapshot.trendTone, snapshot.emaGauge, `EMA50 ${formatUSD(snapshot.ema50)}`)}
+        ${technicalIndicatorCard('Biến động ATR', formatPct(snapshot.atrPct, 2, false), snapshot.volatilityLabel, snapshot.volatilityTone, snapshot.atrGauge, `ATR ${formatUSD(snapshot.atr)}`)}
+      </section>
+
+      <section class="technical-pro-explainer">
+        <div><span class="technical-pro-kicker">CÁCH ĐỌC NHANH</span><h2>Ba lớp thông tin trên biểu đồ</h2></div>
+        <div class="technical-pro-explainer-grid">
+          <article><span>01</span><div><b>Xu hướng</b><p>So sánh giá với EMA20, EMA50 và EMA200 để nhận biết xu hướng ngắn, trung và dài hạn.</p></div></article>
+          <article><span>02</span><div><b>Động lượng</b><p>RSI, Stochastic và MACD giúp nhận biết lực mua bán, vùng quá mua hoặc quá bán.</p></div></article>
+          <article><span>03</span><div><b>Biến động</b><p>ATR, Bollinger Bands và khối lượng cho biết mức độ dao động, không phải dự báo chắc chắn.</p></div></article>
+        </div>
+      </section>
     `;
-    drawTechnicalChart('technicalChart', res.data.data || [], p2pRes.data.data || []);
+
+    const chart = drawAdvancedTechnicalChart('technicalProChart', rows, p2pRows, snapshot);
+    bindTechnicalChartControls(chart);
   } catch (error) {
     document.getElementById('chartContent').innerHTML = errorBox(error.message);
   }
+}
+
+function normalizeTechnicalRows(rows = []) {
+  return [...(Array.isArray(rows) ? rows : [])]
+    .filter(row => row?.timestamp)
+    .sort((a, b) => parseTs(a.timestamp) - parseTs(b.timestamp));
+}
+
+function technicalNumber(value, fallback = null) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function clampPercent(value) {
+  return Math.max(0, Math.min(100, technicalNumber(value, 0)));
+}
+
+function buildTechnicalSnapshot(rows, p2pRows, hours) {
+  const latest = rows.at(-1) || {};
+  const first = rows[0] || latest;
+  const close = technicalNumber(latest.close, 0);
+  const open = technicalNumber(first.open, close);
+  const highs = rows.map(row => technicalNumber(row.high)).filter(Number.isFinite);
+  const lows = rows.map(row => technicalNumber(row.low)).filter(Number.isFinite);
+  const volume = rows.reduce((total, row) => total + (technicalNumber(row.volume, 0) || 0), 0);
+  const high = highs.length ? Math.max(...highs) : close;
+  const low = lows.length ? Math.min(...lows) : close;
+  const absoluteChange = close - open;
+  const periodChange = open ? (absoluteChange / open) * 100 : 0;
+  const rangePct = low ? ((high - low) / low) * 100 : 0;
+
+  const ema20 = technicalNumber(latest.ema_20, close);
+  const ema50 = technicalNumber(latest.ema_50, close);
+  const ema200 = technicalNumber(latest.ema_200, close);
+  const rsi = technicalNumber(latest.rsi_14, 50);
+  const macd = technicalNumber(latest.macd, 0);
+  const macdSignal = technicalNumber(latest.macd_signal, 0);
+  const macdHist = technicalNumber(latest.macd_hist, macd - macdSignal);
+  const stochK = technicalNumber(latest.stoch_k, 50);
+  const stochD = technicalNumber(latest.stoch_d, 50);
+  const atr = technicalNumber(latest.atr_14, 0);
+  const atrPct = close ? (atr / close) * 100 : 0;
+  const bbUpper = technicalNumber(latest.bb_upper, close);
+  const bbMid = technicalNumber(latest.bb_mid, close);
+  const bbLower = technicalNumber(latest.bb_lower, close);
+  const bbWidthRaw = technicalNumber(latest.bb_width);
+  const bbWidth = bbWidthRaw !== null ? bbWidthRaw : (bbMid ? ((bbUpper - bbLower) / bbMid) * 100 : 0);
+  const bbPosition = bbUpper !== bbLower ? ((close - bbLower) / (bbUpper - bbLower)) * 100 : 50;
+
+  const recentRows = rows.slice(-Math.min(48, rows.length));
+  const resistance = Math.max(...recentRows.map(row => technicalNumber(row.high, close)));
+  const support = Math.min(...recentRows.map(row => technicalNumber(row.low, close)));
+  const resistanceDistance = close ? ((resistance - close) / close) * 100 : 0;
+  const supportDistance = close ? ((support - close) / close) * 100 : 0;
+
+  let rawScore = 0;
+  rawScore += close > ema20 ? 2 : -2;
+  rawScore += ema20 > ema50 ? 2 : -2;
+  rawScore += ema50 > ema200 ? 2 : -2;
+  rawScore += macdHist > 0 ? 1 : -1;
+  rawScore += rsi >= 50 && rsi <= 70 ? 1 : rsi < 40 ? -1 : 0;
+  const score = Math.round(Math.max(0, Math.min(100, 50 + rawScore * 6.25)));
+  const biasLabel = rawScore >= 4 ? 'TĂNG' : rawScore <= -4 ? 'GIẢM' : 'TRUNG LẬP';
+  const biasClass = rawScore >= 4 ? 'bullish' : rawScore <= -4 ? 'bearish' : 'neutral';
+  const biasTitle = rawScore >= 4 ? 'Xu hướng đang nghiêng tăng' : rawScore <= -4 ? 'Xu hướng đang nghiêng giảm' : 'Thị trường đang cân bằng';
+  const biasDescription = rawScore >= 4
+    ? 'Giá và các đường trung bình đang cho tín hiệu tích cực, nhưng vẫn cần theo dõi vùng kháng cự.'
+    : rawScore <= -4
+      ? 'Động lượng và cấu trúc EMA đang yếu; ưu tiên quản trị rủi ro tại vùng hỗ trợ.'
+      : 'Các chỉ báo chưa đồng thuận rõ ràng. Nên chờ thêm xác nhận từ giá và khối lượng.';
+
+  const trendBullish = close > ema20 && ema20 > ema50;
+  const trendBearish = close < ema20 && ema20 < ema50;
+  const trendLabel = trendBullish ? 'Tăng' : trendBearish ? 'Giảm' : 'Đi ngang';
+  const trendTone = trendBullish ? 'positive' : trendBearish ? 'negative' : 'neutral';
+  const trendNote = close > ema200 ? 'Giá trên EMA200' : 'Giá dưới EMA200';
+
+  const rsiLabel = rsi >= 70 ? 'Quá mua' : rsi <= 30 ? 'Quá bán' : rsi >= 55 ? 'Tích cực' : rsi <= 45 ? 'Suy yếu' : 'Trung tính';
+  const rsiTone = rsi >= 70 ? 'warning' : rsi <= 30 ? 'info' : rsi >= 55 ? 'positive' : rsi <= 45 ? 'negative' : 'neutral';
+  const macdLabel = macdHist > 0 ? 'Dương' : macdHist < 0 ? 'Âm' : 'Cân bằng';
+  const macdTone = macdHist > 0 ? 'positive' : macdHist < 0 ? 'negative' : 'neutral';
+  const stochLabel = stochK >= 80 ? 'Quá mua' : stochK <= 20 ? 'Quá bán' : stochK > stochD ? 'Động lượng tăng' : 'Động lượng giảm';
+  const stochTone = stochK >= 80 ? 'warning' : stochK <= 20 ? 'info' : stochK > stochD ? 'positive' : 'negative';
+  const bbLabel = bbPosition >= 80 ? 'Sát dải trên' : bbPosition <= 20 ? 'Sát dải dưới' : 'Trong biên';
+  const bbTone = bbPosition >= 80 ? 'warning' : bbPosition <= 20 ? 'info' : 'neutral';
+  const volatilityLabel = atrPct >= 3 ? 'Biến động cao' : atrPct >= 1.5 ? 'Biến động vừa' : 'Biến động thấp';
+  const volatilityTone = atrPct >= 3 ? 'warning' : atrPct >= 1.5 ? 'info' : 'neutral';
+
+  const p2pSorted = [...(Array.isArray(p2pRows) ? p2pRows : [])].sort((a, b) => parseTs(b.timestamp) - parseTs(a.timestamp));
+  const latestBuy = p2pSorted.find(row => String(row.trade_type || '').toUpperCase() === 'BUY');
+  const latestSell = p2pSorted.find(row => String(row.trade_type || '').toUpperCase() === 'SELL');
+  const p2pBuyRate = technicalNumber(latestBuy?.p2p_price);
+  const p2pSellRate = technicalNumber(latestSell?.p2p_price);
+  const p2pBuyBtc = p2pBuyRate ? close * p2pBuyRate : null;
+  const p2pSellBtc = p2pSellRate ? close * p2pSellRate : null;
+
+  return {
+    close, open, high, low, volume, absoluteChange, periodChange, rangePct,
+    timestamp: latest.timestamp, periodLabel: hours === 24 ? '24 giờ' : hours === 168 ? '7 ngày' : '30 ngày',
+    ema20, ema50, ema200, rsi, macd, macdSignal, macdHist, stochK, stochD,
+    atr, atrPct, bbUpper, bbMid, bbLower, bbWidth, bbPosition,
+    resistance, support, resistanceDistance, supportDistance,
+    score, biasLabel, biasClass, biasTitle, biasDescription,
+    trendLabel, trendTone, trendNote, rsiLabel, rsiTone, macdLabel, macdTone,
+    stochLabel, stochTone, bbLabel, bbTone, volatilityLabel, volatilityTone,
+    macdGauge: clampPercent(50 + Math.tanh(macdHist / Math.max(1, atr || 1)) * 42),
+    emaGauge: clampPercent(50 + ((close - ema50) / Math.max(close * .04, 1)) * 50),
+    atrGauge: clampPercent((atrPct / 5) * 100),
+    p2pBuyBtc, p2pSellBtc, hasP2P: Number.isFinite(p2pBuyBtc) || Number.isFinite(p2pSellBtc)
+  };
+}
+
+function technicalMetricCard(label, value, note, icon) {
+  const icons = { high: '↗', low: '↘', volume: '▥', atr: '≈' };
+  return `<article class="technical-pro-kpi-card ${icon}"><span class="technical-pro-kpi-icon">${icons[icon] || '•'}</span><div><span>${label}</span><strong>${value}</strong><small>${note}</small></div></article>`;
+}
+
+function technicalSignalRow(label, value, tone, note) {
+  return `<div class="technical-pro-signal-row"><div><span>${label}</span><small>${note}</small></div><strong class="${tone}">${value}</strong></div>`;
+}
+
+function technicalIndicatorCard(label, value, status, tone, progress, note) {
+  return `
+    <article class="technical-pro-indicator-card">
+      <div class="technical-pro-indicator-head"><span>${label}</span><b class="${tone}">${status}</b></div>
+      <strong>${value}</strong>
+      <div class="technical-pro-progress ${tone}"><i style="width:${clampPercent(progress)}%"></i></div>
+      <small>${note}</small>
+    </article>`;
+}
+
+function bindTechnicalChartControls(chart) {
+  if (!chart) return;
+  const groups = {
+    ema: ['EMA20', 'EMA50', 'EMA200'],
+    bollinger: ['BB Upper', 'BB Mid', 'BB Lower'],
+    p2p: ['BTC P2P mua', 'BTC P2P bán']
+  };
+  document.querySelectorAll('[data-tech-group]').forEach(button => {
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      const group = button.dataset.techGroup;
+      button.classList.toggle('active');
+      (groups[group] || []).forEach(name => chart.dispatchAction({ type: 'legendToggleSelect', name }));
+    });
+  });
+  document.getElementById('technicalResetZoom')?.addEventListener('click', () => {
+    chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 });
+  });
 }
 
 async function renderP2PPage() {
@@ -1343,18 +1686,19 @@ function renderChatPage() {
         </div>
         <div id="messages" class="messages"></div>
       </div>
-      <div class="chat-input">
+      <form id="chatForm" class="chat-input">
         <div class="field"><input id="chatInput" type="text" placeholder="Nhập câu hỏi của bạn..."></div>
-        <button id="chatSend" class="btn primary">Gửi</button>
-      </div>
+        <button id="chatSend" class="btn primary" type="submit">Gửi</button>
+      </form>
     </section>
   `;
   renderMessages();
-  document.getElementById('chatSend').addEventListener('click', sendChat);
-  document.getElementById('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
-  document.querySelectorAll('[data-question]').forEach(btn => btn.addEventListener('click', () => {
-    document.getElementById('chatInput').value = btn.dataset.question;
+  document.getElementById('chatForm').addEventListener('submit', event => {
+    event.preventDefault();
     sendChat();
+  });
+  document.querySelectorAll('[data-question]').forEach(btn => btn.addEventListener('click', () => {
+    sendChat(btn.dataset.question || '');
   }));
 }
 
@@ -1365,11 +1709,17 @@ function renderMessages() {
   box.scrollTop = box.scrollHeight;
 }
 
-async function sendChat() {
+async function sendChat(forcedQuestion = '') {
   const input = document.getElementById('chatInput');
-  const question = input.value.trim();
-  if (!question) return;
-  input.value = '';
+  const question = String(forcedQuestion || input?.value || '').trim();
+  if (!question || chatSending) return;
+  chatSending = true;
+  const sendButton = document.getElementById('chatSend');
+  if (input) input.value = '';
+  if (sendButton) {
+    sendButton.disabled = true;
+    sendButton.textContent = 'Đang gửi...';
+  }
   chatMessages.push({ role: 'user', text: question });
   chatMessages.push({ role: 'ai', text: 'AI đang phân tích dữ liệu thị trường...' });
   renderMessages();
@@ -1382,6 +1732,12 @@ async function sendChat() {
     };
   } catch (error) {
     chatMessages[chatMessages.length - 1] = { role: 'ai', text: `AI hiện không phản hồi được: ${error.message}` };
+  } finally {
+    chatSending = false;
+    if (sendButton) {
+      sendButton.disabled = false;
+      sendButton.textContent = 'Gửi';
+    }
   }
   renderMessages();
 }
@@ -2421,6 +2777,179 @@ function drawTechnicalChart(id, data, p2pRows = []) {
   });
 }
 
+
+function drawAdvancedTechnicalChart(id, data, p2pRows = [], snapshot = {}) {
+  const el = document.getElementById(id);
+  if (!el || !window.echarts || !data.length) return null;
+
+  const chart = echarts.init(el);
+  charts.push(chart);
+  const dark = document.body.dataset.theme === 'dark' || document.documentElement.dataset.theme === 'dark';
+  const axisColor = dark ? '#94a3b8' : '#64748b';
+  const splitColor = dark ? 'rgba(148,163,184,.13)' : 'rgba(148,163,184,.18)';
+  const tooltipBg = dark ? 'rgba(8,15,28,.96)' : 'rgba(255,255,255,.98)';
+  const tooltipText = dark ? '#f8fafc' : '#0f172a';
+  const labels = data.map(row => formatVNTime(row.timestamp, 'short'));
+  const n = value => technicalNumber(value);
+  const candle = data.map(row => [n(row.open), n(row.close), n(row.low), n(row.high)]);
+  const volume = data.map(row => ({
+    value: n(row.volume, 0),
+    itemStyle: { color: n(row.close, 0) >= n(row.open, 0) ? 'rgba(16,185,129,.58)' : 'rgba(239,68,68,.55)' }
+  }));
+  const macdHistogram = data.map(row => {
+    const value = n(row.macd_hist, 0);
+    return { value, itemStyle: { color: value >= 0 ? 'rgba(16,185,129,.75)' : 'rgba(239,68,68,.72)' } };
+  });
+
+  const p2pByHour = new Map();
+  (Array.isArray(p2pRows) ? p2pRows : []).forEach(row => {
+    const type = String(row.trade_type || '').toUpperCase();
+    const key = hourKey(row.timestamp);
+    const rate = n(row.p2p_price);
+    if (type && key && Number.isFinite(rate)) p2pByHour.set(`${type}:${key}`, rate);
+  });
+  const p2pSeries = type => data.map(row => {
+    const rate = p2pByHour.get(`${type}:${hourKey(row.timestamp)}`);
+    const close = n(row.close);
+    return Number.isFinite(rate) && Number.isFinite(close) ? Math.round(rate * close) : null;
+  });
+  const p2pBuy = p2pSeries('BUY');
+  const p2pSell = p2pSeries('SELL');
+  const hasP2P = p2pBuy.some(Number.isFinite) || p2pSell.some(Number.isFinite);
+
+  const selected = {
+    'BTC P2P mua': false,
+    'BTC P2P bán': false
+  };
+
+  chart.setOption({
+    animation: false,
+    color: ['#f7931a', '#38bdf8', '#8b5cf6', '#94a3b8', '#10b981', '#ef4444'],
+    backgroundColor: 'transparent',
+    textStyle: { fontFamily: 'Inter, sans-serif', color: axisColor },
+    axisPointer: { link: [{ xAxisIndex: 'all' }], label: { backgroundColor: dark ? '#334155' : '#475569' } },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross', snap: true },
+      backgroundColor: tooltipBg,
+      borderColor: dark ? 'rgba(148,163,184,.28)' : '#e2e8f0',
+      borderWidth: 1,
+      textStyle: { color: tooltipText, fontSize: 12 },
+      padding: [12, 14],
+      extraCssText: 'border-radius:12px;box-shadow:0 18px 42px rgba(15,23,42,.18);'
+    },
+    legend: {
+      type: 'scroll',
+      top: 8,
+      left: 10,
+      right: 10,
+      itemWidth: 18,
+      itemHeight: 8,
+      textStyle: { color: axisColor, fontSize: 11 },
+      selected,
+      data: [
+        'BTC/USDT', 'EMA20', 'EMA50', 'EMA200', 'BB Upper', 'BB Mid', 'BB Lower',
+        ...(hasP2P ? ['BTC P2P mua', 'BTC P2P bán'] : []),
+        'Khối lượng', 'RSI 14', 'Stoch K', 'Stoch D', 'MACD Hist', 'MACD', 'Signal'
+      ]
+    },
+    grid: [
+      { left: 66, right: hasP2P ? 84 : 28, top: 66, height: '42%' },
+      { left: 66, right: hasP2P ? 84 : 28, top: '54%', height: '10%' },
+      { left: 66, right: hasP2P ? 84 : 28, top: '68%', height: '12%' },
+      { left: 66, right: hasP2P ? 84 : 28, top: '84%', height: '10%' }
+    ],
+    xAxis: [0, 1, 2, 3].map((gridIndex, index) => ({
+      type: 'category',
+      gridIndex,
+      data: labels,
+      boundaryGap: true,
+      axisLine: { lineStyle: { color: splitColor } },
+      axisTick: { show: false },
+      axisLabel: { show: index === 3, color: axisColor, fontSize: 10, hideOverlap: true },
+      splitLine: { show: false },
+      min: 'dataMin',
+      max: 'dataMax'
+    })),
+    yAxis: [
+      {
+        type: 'value', scale: true, position: 'left', name: 'USD', nameTextStyle: { color: axisColor, padding: [0, 0, 0, -18] },
+        axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: axisColor, formatter: value => `$${formatNumber(value, 0)}` },
+        splitLine: { lineStyle: { color: splitColor, type: 'dashed' } }
+      },
+      {
+        type: 'value', scale: true, position: 'right', name: 'P2P VNĐ', show: hasP2P,
+        nameTextStyle: { color: axisColor }, axisLine: { show: false }, axisTick: { show: false },
+        axisLabel: { color: axisColor, formatter: value => `${formatNumber(value / 1_000_000, 0)}tr` }, splitLine: { show: false }
+      },
+      {
+        type: 'value', gridIndex: 1, scale: true, axisLine: { show: false }, axisTick: { show: false },
+        axisLabel: { color: axisColor, fontSize: 10, formatter: value => formatNumber(value, 0) },
+        splitLine: { lineStyle: { color: splitColor, type: 'dashed' } }
+      },
+      {
+        type: 'value', gridIndex: 2, min: 0, max: 100, interval: 20, axisLine: { show: false }, axisTick: { show: false },
+        axisLabel: { color: axisColor, fontSize: 10 }, splitLine: { lineStyle: { color: splitColor, type: 'dashed' } }
+      },
+      {
+        type: 'value', gridIndex: 3, scale: true, axisLine: { show: false }, axisTick: { show: false },
+        axisLabel: { color: axisColor, fontSize: 10, formatter: value => formatNumber(value, 0) },
+        splitLine: { lineStyle: { color: splitColor, type: 'dashed' } }
+      }
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1, 2, 3], start: 0, end: 100, zoomOnMouseWheel: true, moveOnMouseMove: true },
+      {
+        type: 'slider', xAxisIndex: [0, 1, 2, 3], bottom: 0, height: 20,
+        borderColor: 'transparent', backgroundColor: dark ? 'rgba(15,23,42,.65)' : '#f1f5f9',
+        fillerColor: dark ? 'rgba(247,147,26,.22)' : 'rgba(247,147,26,.18)',
+        handleStyle: { color: '#f7931a', borderColor: '#f7931a' },
+        textStyle: { color: axisColor, fontSize: 10 }, showDetail: false
+      }
+    ],
+    series: [
+      {
+        name: 'BTC/USDT', type: 'candlestick', data: candle, barMaxWidth: 11,
+        itemStyle: { color: '#10b981', color0: '#ef4444', borderColor: '#10b981', borderColor0: '#ef4444' },
+        markLine: {
+          silent: true, symbol: ['none', 'none'], label: { fontSize: 10, formatter: '{b}' },
+          data: [
+            { name: `Kháng cự ${formatUSD(snapshot.resistance, 0)}`, yAxis: snapshot.resistance, lineStyle: { color: '#ef4444', type: 'dashed', opacity: .62 }, label: { color: '#ef4444', position: 'insideEndTop' } },
+            { name: `Hỗ trợ ${formatUSD(snapshot.support, 0)}`, yAxis: snapshot.support, lineStyle: { color: '#10b981', type: 'dashed', opacity: .62 }, label: { color: '#10b981', position: 'insideEndBottom' } }
+          ]
+        }
+      },
+      { name: 'EMA20', type: 'line', data: data.map(row => n(row.ema_20)), smooth: true, showSymbol: false, lineStyle: { width: 1.8, color: '#f59e0b' }, emphasis: { focus: 'series' } },
+      { name: 'EMA50', type: 'line', data: data.map(row => n(row.ema_50)), smooth: true, showSymbol: false, lineStyle: { width: 1.7, color: '#38bdf8' }, emphasis: { focus: 'series' } },
+      { name: 'EMA200', type: 'line', data: data.map(row => n(row.ema_200)), smooth: true, showSymbol: false, lineStyle: { width: 1.6, color: '#8b5cf6' }, emphasis: { focus: 'series' } },
+      { name: 'BB Upper', type: 'line', data: data.map(row => n(row.bb_upper)), showSymbol: false, lineStyle: { width: 1, color: '#94a3b8', type: 'dashed', opacity: .75 }, symbol: 'none' },
+      { name: 'BB Mid', type: 'line', data: data.map(row => n(row.bb_mid)), showSymbol: false, lineStyle: { width: 1, color: '#64748b', type: 'dotted', opacity: .55 }, symbol: 'none' },
+      { name: 'BB Lower', type: 'line', data: data.map(row => n(row.bb_lower)), showSymbol: false, lineStyle: { width: 1, color: '#94a3b8', type: 'dashed', opacity: .75 }, symbol: 'none' },
+      ...(hasP2P ? [
+        { name: 'BTC P2P mua', type: 'line', yAxisIndex: 1, data: p2pBuy, showSymbol: false, smooth: true, lineStyle: { width: 1.5, color: '#22c55e', type: 'dashed' } },
+        { name: 'BTC P2P bán', type: 'line', yAxisIndex: 1, data: p2pSell, showSymbol: false, smooth: true, lineStyle: { width: 1.5, color: '#f97316', type: 'dashed' } }
+      ] : []),
+      { name: 'Khối lượng', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, data: volume, barMaxWidth: 9, emphasis: { disabled: true } },
+      {
+        name: 'RSI 14', type: 'line', xAxisIndex: 2, yAxisIndex: 3, data: data.map(row => n(row.rsi_14)), showSymbol: false,
+        lineStyle: { width: 1.8, color: '#f7931a' },
+        markLine: { silent: true, symbol: 'none', label: { show: false }, data: [
+          { yAxis: 30, lineStyle: { color: '#38bdf8', type: 'dashed', opacity: .55 } },
+          { yAxis: 50, lineStyle: { color: '#64748b', type: 'dotted', opacity: .38 } },
+          { yAxis: 70, lineStyle: { color: '#ef4444', type: 'dashed', opacity: .55 } }
+        ] }
+      },
+      { name: 'Stoch K', type: 'line', xAxisIndex: 2, yAxisIndex: 3, data: data.map(row => n(row.stoch_k)), showSymbol: false, lineStyle: { width: 1.2, color: '#38bdf8', opacity: .88 } },
+      { name: 'Stoch D', type: 'line', xAxisIndex: 2, yAxisIndex: 3, data: data.map(row => n(row.stoch_d)), showSymbol: false, lineStyle: { width: 1.2, color: '#8b5cf6', opacity: .88 } },
+      { name: 'MACD Hist', type: 'bar', xAxisIndex: 3, yAxisIndex: 4, data: macdHistogram, barMaxWidth: 8 },
+      { name: 'MACD', type: 'line', xAxisIndex: 3, yAxisIndex: 4, data: data.map(row => n(row.macd)), showSymbol: false, lineStyle: { width: 1.5, color: '#38bdf8' } },
+      { name: 'Signal', type: 'line', xAxisIndex: 3, yAxisIndex: 4, data: data.map(row => n(row.macd_signal)), showSymbol: false, lineStyle: { width: 1.4, color: '#f59e0b' } }
+    ]
+  }, true);
+
+  return chart;
+}
+
 function drawP2PChart(id, rows) {
   const el = document.getElementById(id);
   if (!el || !window.echarts) return;
@@ -2466,16 +2995,19 @@ async function initAuth() {
     if (error) console.warn('Supabase getSession error:', error.message);
 
     currentSession = data?.session || null;
-    authReady = true;
     await syncCurrentUserProfile();
+    await loadCurrentUserProfile();
+    authReady = true;
     renderAuthHeader();
 
     redirectAfterLoginIfNeeded();
 
     supabaseAuth.auth.onAuthStateChange(async (event, session) => {
       currentSession = session || null;
-      authReady = true;
+      currentUserProfile = null;
       await syncCurrentUserProfile();
+      await loadCurrentUserProfile();
+      authReady = true;
       renderAuthHeader();
 
       if (event === 'SIGNED_IN') {
@@ -2487,6 +3019,7 @@ async function initAuth() {
       }
 
       if (event === 'SIGNED_OUT' && protectedRoutes.has(activeRoute)) {
+        currentUserProfile = null;
         showToast('Bạn đã đăng xuất. Vui lòng đăng nhập để tiếp tục.');
         location.hash = '#login';
       }
@@ -2502,6 +3035,47 @@ async function initAuth() {
 
 function authHeader() {
   return currentSession?.access_token ? { Authorization: `Bearer ${currentSession.access_token}` } : {};
+}
+
+async function loadCurrentUserProfile() {
+  currentUserProfile = null;
+  if (!supabaseAuth || !currentSession?.user?.id) return null;
+  try {
+    const { data, error } = await supabaseAuth
+      .from('user_profiles')
+      .select('user_id,email,full_name,role,status,password_set,created_at,last_login_at')
+      .eq('user_id', currentSession.user.id)
+      .maybeSingle();
+    if (error) throw error;
+    currentUserProfile = data || null;
+  } catch (error) {
+    console.warn('Không đọc được user_profiles:', error.message);
+    const metadataRole = currentSession.user.app_metadata?.role || currentSession.user.user_metadata?.role;
+    currentUserProfile = {
+      user_id: currentSession.user.id,
+      email: currentSession.user.email,
+      role: metadataRole === 'admin' ? 'admin' : 'user',
+      status: 'active'
+    };
+  }
+
+  if (currentUserProfile?.status === 'suspended') {
+    showToast('Tài khoản đã bị tạm khóa. Vui lòng liên hệ quản trị viên.');
+    await supabaseAuth.auth.signOut();
+    currentSession = null;
+    currentUserProfile = null;
+  }
+  return currentUserProfile;
+}
+
+function isAdmin() {
+  const profileRole = String(currentUserProfile?.role || '').toLowerCase();
+  const metadataRole = String(
+    currentSession?.user?.app_metadata?.role
+    || currentSession?.user?.user_metadata?.role
+    || ''
+  ).toLowerCase();
+  return profileRole === 'admin' || metadataRole === 'admin';
 }
 
 function ensureAuthBox() {
@@ -2615,33 +3189,47 @@ function renderAuthHeader() {
   if (!el) return;
 
   if (!supabaseAuth) {
+    updateAdminNavigation(false);
     el.innerHTML = `<a class="btn small secondary auth-entry" href="#login" title="Cần cấu hình VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY">Tài khoản</a>`;
     return;
   }
 
   if (!authReady) {
+    updateAdminNavigation(false);
     el.innerHTML = `<span class="badge amber">Đang kiểm tra...</span>`;
     return;
   }
 
   const email = currentSession?.user?.email;
   if (email) {
+    const admin = isAdmin();
+    updateAdminNavigation(admin);
     const passwordState = needsPasswordSetup() ? '<span class="auth-warn-dot" title="Cần đặt mật khẩu"></span>' : '';
     el.innerHTML = `
+      ${admin ? '<a class="admin-console-link" href="#admin" title="Mở Admin Console">ADMIN</a>' : ''}
       <a class="user-email" href="#account" title="${escapeHTML(email)}">${passwordState}${escapeHTML(shortEmail(email))}</a>
       <button id="logoutBtn" class="btn small secondary" type="button">Đăng xuất</button>
     `;
     document.getElementById('logoutBtn')?.addEventListener('click', async () => {
       await supabaseAuth.auth.signOut();
       currentSession = null;
+      currentUserProfile = null;
       showToast('Đã đăng xuất.');
       renderAuthHeader();
       if (protectedRoutes.has(activeRoute)) location.hash = '#login';
       else route();
     });
   } else {
+    updateAdminNavigation(false);
     el.innerHTML = `<a class="btn small secondary auth-entry" href="#login">Tài khoản</a>`;
   }
+}
+
+function updateAdminNavigation(visible) {
+  document.querySelectorAll('[data-admin-nav]').forEach(el => {
+    el.classList.toggle('hidden', !visible);
+    el.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  });
 }
 
 function shortEmail(email) {
@@ -2954,9 +3542,7 @@ function installFloatingAIChat() {
     sendFloatingAIMessage();
   });
   document.querySelectorAll('[data-floating-question]').forEach(btn => btn.addEventListener('click', () => {
-    const input = document.getElementById('floatingAIInput');
-    if (input) input.value = btn.dataset.floatingQuestion;
-    sendFloatingAIMessage();
+    sendFloatingAIMessage(btn.dataset.floatingQuestion || '');
   }));
 
   renderFloatingAIMessages();
@@ -3056,12 +3642,18 @@ function renderFloatingAIMessages() {
   box.scrollTop = box.scrollHeight;
 }
 
-async function sendFloatingAIMessage() {
+async function sendFloatingAIMessage(forcedQuestion = '') {
   const input = document.getElementById('floatingAIInput');
-  const question = input?.value.trim();
-  if (!question) return;
+  const question = String(forcedQuestion || input?.value || '').trim();
+  if (!question || floatingChatSending) return;
 
-  input.value = '';
+  floatingChatSending = true;
+  const sendButton = document.querySelector('#floatingAIForm button[type="submit"]');
+  if (input) input.value = '';
+  if (sendButton) {
+    sendButton.disabled = true;
+    sendButton.textContent = '...';
+  }
   chatMessages.push({ role: 'user', text: question });
   chatMessages.push({ role: 'ai', text: 'AI đang phân tích dữ liệu bạn đang xem...' });
   renderFloatingAIMessages();
@@ -3076,6 +3668,12 @@ async function sendFloatingAIMessage() {
     };
   } catch (error) {
     chatMessages[chatMessages.length - 1] = { role: 'ai', text: `AI hiện không phản hồi được: ${error.message}` };
+  } finally {
+    floatingChatSending = false;
+    if (sendButton) {
+      sendButton.disabled = false;
+      sendButton.textContent = 'Gửi';
+    }
   }
 
   renderFloatingAIMessages();
@@ -3148,31 +3746,39 @@ function renderLoginPage() {
           ` : ''}
 
           <div class="auth-tabs" id="authModeTabs">
-            <button class="active" data-auth-mode="register" type="button">Đăng ký</button>
-            <button data-auth-mode="login" type="button">Đăng nhập</button>
+            <button class="active" data-auth-mode="login" type="button">Đăng nhập</button>
+            <button data-auth-mode="register" type="button">Đăng ký</button>
           </div>
 
-          <div id="registerPanel" class="auth-mode-panel">
+          <div id="registerPanel" class="auth-mode-panel hidden">
             <h2>Tạo tài khoản</h2>
             <p class="muted">Hệ thống gửi mã OTP qua email. Bạn nhập mã tại đây để xác thực, không cần bấm link nên tránh token nằm trên URL.</p>
-            <div class="field"><label>Email</label><input id="registerEmail" type="email" placeholder="you@example.com" autocomplete="email"></div>
-            <button id="registerSubmit" class="btn primary full" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Gửi mã OTP xác thực</button>
+            <form id="registerEmailForm" novalidate>
+              <div class="field"><label for="registerEmail">Email</label><input id="registerEmail" type="email" placeholder="you@example.com" autocomplete="email" required></div>
+              <button id="registerSubmit" class="btn primary full" type="submit" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Gửi mã OTP xác thực</button>
+            </form>
             <div id="registerOtpBox" class="otp-box hidden">
-              <div class="field"><label>Mã OTP trong email</label><input id="registerOtp" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="123456" autocomplete="one-time-code"></div>
-              <button id="registerOtpVerify" class="btn secondary full" type="button">Xác nhận mã OTP</button>
+              <form id="registerOtpForm" novalidate>
+                <div class="field"><label for="registerOtp">Mã OTP trong email</label><input id="registerOtp" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="123456" autocomplete="one-time-code" required></div>
+                <button id="registerOtpVerify" class="btn secondary full" type="submit">Xác nhận mã OTP</button>
+              </form>
             </div>
           </div>
 
-          <div id="loginPanel" class="auth-mode-panel hidden">
+          <div id="loginPanel" class="auth-mode-panel">
             <h2>Đăng nhập</h2>
             <p class="muted">Ưu tiên đăng nhập bằng mật khẩu. Nếu quên hoặc chưa đặt mật khẩu, dùng mã OTP qua email.</p>
-            <div class="field"><label>Email</label><input id="loginEmail" type="email" placeholder="you@example.com" autocomplete="email"></div>
-            <div class="field"><label>Mật khẩu</label><input id="loginPassword" type="password" placeholder="••••••••" autocomplete="current-password"></div>
-            <button id="passwordLoginSubmit" class="btn primary full" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Đăng nhập bằng mật khẩu</button>
-            <button id="otpLoginSubmit" class="btn secondary full" style="margin-top:10px" ${!supabaseAuth ? 'disabled' : ''}>Gửi mã OTP qua email</button>
+            <form id="passwordLoginForm" novalidate>
+              <div class="field"><label for="loginEmail">Email</label><input id="loginEmail" type="email" placeholder="you@example.com" autocomplete="email" required></div>
+              <div class="field"><label for="loginPassword">Mật khẩu</label><div class="password-input-wrap"><input id="loginPassword" type="password" placeholder="••••••••" autocomplete="current-password" required><button class="password-toggle" type="button" data-password-toggle="loginPassword" aria-label="Hiện mật khẩu" aria-pressed="false"><span aria-hidden="true">👁</span></button></div></div>
+              <button id="passwordLoginSubmit" class="btn primary full" type="submit" style="margin-top:14px" ${!supabaseAuth ? 'disabled' : ''}>Đăng nhập bằng mật khẩu</button>
+            </form>
+            <button id="otpLoginSubmit" class="btn secondary full" type="button" style="margin-top:10px" ${!supabaseAuth ? 'disabled' : ''}>Gửi mã OTP qua email</button>
             <div id="loginOtpBox" class="otp-box hidden">
-              <div class="field"><label>Mã OTP trong email</label><input id="loginOtp" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="123456" autocomplete="one-time-code"></div>
-              <button id="loginOtpVerify" class="btn secondary full" type="button">Xác nhận mã OTP</button>
+              <form id="loginOtpForm" novalidate>
+                <div class="field"><label for="loginOtp">Mã OTP trong email</label><input id="loginOtp" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="123456" autocomplete="one-time-code" required></div>
+                <button id="loginOtpVerify" class="btn secondary full" type="submit">Xác nhận mã OTP</button>
+              </form>
             </div>
           </div>
 
@@ -3183,11 +3789,24 @@ function renderLoginPage() {
   `;
 
   setupAuthTabs();
-  document.getElementById('registerSubmit')?.addEventListener('click', () => requestEmailOtp('register', next));
+  setupPasswordToggles();
+  document.getElementById('registerEmailForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    requestEmailOtp('register', next);
+  });
   document.getElementById('otpLoginSubmit')?.addEventListener('click', () => requestEmailOtp('login', next));
-  document.getElementById('registerOtpVerify')?.addEventListener('click', () => verifyEmailOtp('register', next));
-  document.getElementById('loginOtpVerify')?.addEventListener('click', () => verifyEmailOtp('login', next));
-  document.getElementById('passwordLoginSubmit')?.addEventListener('click', () => signInWithPasswordUI(next));
+  document.getElementById('registerOtpForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    verifyEmailOtp('register', next);
+  });
+  document.getElementById('loginOtpForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    verifyEmailOtp('login', next);
+  });
+  document.getElementById('passwordLoginForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    signInWithPasswordUI(next);
+  });
 }
 
 function setupAuthTabs() {
@@ -3201,15 +3820,50 @@ function setupAuthTabs() {
   }));
 }
 
+function setupPasswordToggles(scope = document) {
+  scope.querySelectorAll('[data-password-toggle]').forEach(button => {
+    if (button.dataset.passwordToggleReady === '1') return;
+    button.dataset.passwordToggleReady = '1';
+    button.addEventListener('click', () => {
+      const input = document.getElementById(button.dataset.passwordToggle);
+      if (!(input instanceof HTMLInputElement)) return;
+      const willShow = input.type === 'password';
+      input.type = willShow ? 'text' : 'password';
+      button.setAttribute('aria-pressed', willShow ? 'true' : 'false');
+      button.setAttribute('aria-label', willShow ? 'Ẩn mật khẩu' : 'Hiện mật khẩu');
+      button.classList.toggle('visible', willShow);
+      input.focus({ preventScroll: true });
+      const end = input.value.length;
+      input.setSelectionRange?.(end, end);
+    });
+  });
+}
+
+function setActionBusy(button, busy, busyText = 'Đang xử lý...') {
+  if (!(button instanceof HTMLButtonElement)) return;
+  if (busy) {
+    if (!button.dataset.idleText) button.dataset.idleText = button.textContent || '';
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = busyText;
+    return;
+  }
+  button.disabled = false;
+  button.removeAttribute('aria-busy');
+  if (button.dataset.idleText) button.textContent = button.dataset.idleText;
+}
+
 async function requestEmailOtp(mode, next = 'dashboard') {
   const inputId = mode === 'register' ? 'registerEmail' : 'loginEmail';
   const boxId = mode === 'register' ? 'registerOtpBox' : 'loginOtpBox';
   const otpInputId = mode === 'register' ? 'registerOtp' : 'loginOtp';
+  const button = document.getElementById(mode === 'register' ? 'registerSubmit' : 'otpLoginSubmit');
   const email = document.getElementById(inputId)?.value.trim();
   const result = document.getElementById('loginResult');
 
   if (!email) {
     result.innerHTML = `<div class="state-box error">Vui lòng nhập email.</div>`;
+    document.getElementById(inputId)?.focus();
     return;
   }
   if (!supabaseAuth) {
@@ -3217,33 +3871,41 @@ async function requestEmailOtp(mode, next = 'dashboard') {
     return;
   }
 
+  setActionBusy(button, true, 'Đang gửi OTP...');
   setPendingNextRoute(mode === 'register' ? 'set-password' : next);
   result.innerHTML = `<div class="state-box empty">Đang gửi mã OTP tới email...</div>`;
 
-  const { error } = await supabaseAuth.auth.signInWithOtp({
-    email,
-    options: {
-      shouldCreateUser: mode === 'register'
+  try {
+    const { error } = await supabaseAuth.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: mode === 'register'
+      }
+    });
+
+    if (error) {
+      result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}</div>`;
+      return;
     }
-  });
 
-  if (error) {
-    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}</div>`;
-    return;
+    const otpBox = document.getElementById(boxId);
+    otpBox?.classList.remove('hidden');
+    otpBox?.setAttribute('data-email', email);
+    document.getElementById(otpInputId)?.focus();
+
+    result.innerHTML = `<div class="state-box empty"><b>Đã gửi mã OTP tới ${escapeHTML(email)}.</b><br>Nhập mã 6 số trong email để xác thực.</div>`;
+  } catch (error) {
+    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message || 'Không gửi được mã OTP.')}</div>`;
+  } finally {
+    setActionBusy(button, false);
   }
-
-  const otpBox = document.getElementById(boxId);
-  otpBox?.classList.remove('hidden');
-  otpBox?.setAttribute('data-email', email);
-  document.getElementById(otpInputId)?.focus();
-
-  result.innerHTML = `<div class="state-box empty"><b>Đã gửi mã OTP tới ${escapeHTML(email)}.</b><br>Nhập mã 6 số trong email để xác thực. Không bấm link magic link nếu email template vẫn còn link cũ.</div>`;
 }
 
 async function verifyEmailOtp(mode, next = 'dashboard') {
   const inputId = mode === 'register' ? 'registerEmail' : 'loginEmail';
   const otpInputId = mode === 'register' ? 'registerOtp' : 'loginOtp';
   const boxId = mode === 'register' ? 'registerOtpBox' : 'loginOtpBox';
+  const button = document.getElementById(mode === 'register' ? 'registerOtpVerify' : 'loginOtpVerify');
   const result = document.getElementById('loginResult');
   const email = document.getElementById(inputId)?.value.trim() || document.getElementById(boxId)?.dataset.email || '';
   const token = (document.getElementById(otpInputId)?.value || '').replace(/\s+/g, '').trim();
@@ -3253,53 +3915,80 @@ async function verifyEmailOtp(mode, next = 'dashboard') {
     return;
   }
   if (!/^\d{6}$/.test(token)) {
-    result.innerHTML = `<div class="state-box error">Mã OTP thường gồm 6 chữ số. Vui lòng kiểm tra lại email.</div>`;
+    result.innerHTML = `<div class="state-box error">Mã OTP gồm 6 chữ số. Vui lòng kiểm tra lại email.</div>`;
+    document.getElementById(otpInputId)?.focus();
     return;
   }
 
+  setActionBusy(button, true, 'Đang xác thực...');
   result.innerHTML = `<div class="state-box empty">Đang xác thực mã OTP...</div>`;
 
-  const { data, error } = await supabaseAuth.auth.verifyOtp({
-    email,
-    token,
-    type: 'email'
-  });
+  try {
+    const { data, error } = await supabaseAuth.auth.verifyOtp({
+      email,
+      token,
+      type: 'email'
+    });
 
-  if (error) {
-    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu mã đã hết hạn, hãy bấm gửi lại mã OTP mới.</small></div>`;
-    return;
+    if (error) {
+      result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu mã đã hết hạn, hãy gửi lại mã OTP mới.</small></div>`;
+      return;
+    }
+
+    currentSession = data.session || null;
+    await syncCurrentUserProfile();
+    await loadCurrentUserProfile();
+    renderAuthHeader();
+    showToast('Xác thực email thành công.');
+    location.hash = needsPasswordSetup() ? '#set-password' : `#${next}`;
+  } catch (error) {
+    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message || 'Không xác thực được OTP.')}</div>`;
+  } finally {
+    setActionBusy(button, false);
   }
-
-  currentSession = data.session || null;
-  await syncCurrentUserProfile();
-  renderAuthHeader();
-  showToast('Xác thực email thành công.');
-  location.hash = needsPasswordSetup() ? '#set-password' : `#${next}`;
 }
 
 async function signInWithPasswordUI(next = 'dashboard') {
-  const email = document.getElementById('loginEmail')?.value.trim();
-  const password = document.getElementById('loginPassword')?.value || '';
+  const emailInput = document.getElementById('loginEmail');
+  const passwordInput = document.getElementById('loginPassword');
+  const email = emailInput?.value.trim();
+  const password = passwordInput?.value || '';
   const result = document.getElementById('loginResult');
+  const button = document.getElementById('passwordLoginSubmit');
 
   if (!email || !password) {
     result.innerHTML = `<div class="state-box error">Vui lòng nhập email và mật khẩu.</div>`;
+    (!email ? emailInput : passwordInput)?.focus();
+    return;
+  }
+  if (!supabaseAuth) {
+    result.innerHTML = `<div class="state-box error">Supabase Auth chưa được cấu hình.</div>`;
     return;
   }
 
+  setActionBusy(button, true, 'Đang đăng nhập...');
   result.innerHTML = `<div class="state-box empty">Đang đăng nhập...</div>`;
-  const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
 
-  if (error) {
-    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu bạn chưa đặt mật khẩu, hãy dùng nút gửi mã OTP qua email.</small></div>`;
-    return;
+  try {
+    const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
+
+    if (error) {
+      result.innerHTML = `<div class="state-box error">${escapeHTML(error.message)}<br><small>Nếu bạn chưa đặt mật khẩu, hãy dùng nút gửi mã OTP qua email.</small></div>`;
+      return;
+    }
+
+    currentSession = data.session || null;
+    await syncCurrentUserProfile();
+    await loadCurrentUserProfile();
+    if (!currentSession) return;
+    renderAuthHeader();
+    showToast(isAdmin() ? 'Đăng nhập admin thành công.' : 'Đăng nhập thành công.');
+    location.hash = isAdmin() && next === 'dashboard' ? '#admin' : (needsPasswordSetup() ? '#set-password' : `#${next}`);
+  } catch (error) {
+    result.innerHTML = `<div class="state-box error">${escapeHTML(error.message || 'Không đăng nhập được.')}</div>`;
+  } finally {
+    setActionBusy(button, false);
   }
-
-  currentSession = data.session || null;
-  await syncCurrentUserProfile();
-  renderAuthHeader();
-  showToast('Đăng nhập thành công.');
-  location.hash = needsPasswordSetup() ? '#set-password' : `#${next}`;
 }
 
 function needsPasswordSetup() {
@@ -3336,16 +4025,22 @@ function renderSetPasswordPage() {
         <p class="muted">Email: <b>${escapeHTML(currentSession.user.email)}</b></p>
         <p class="muted">Mật khẩu giúp bạn đăng nhập nhanh ở các lần sau. Mật khẩu được Supabase Auth quản lý, project không tự lưu mật khẩu trong database.</p>
 
-        <div class="field"><label>Mật khẩu mới</label><input id="newPassword" type="password" autocomplete="new-password" placeholder="Ít nhất 8 ký tự"></div>
-        <div class="field"><label>Nhập lại mật khẩu</label><input id="confirmPassword" type="password" autocomplete="new-password" placeholder="Nhập lại mật khẩu"></div>
-        <div class="password-hint">Yêu cầu: 8+ ký tự, chữ hoa, chữ thường, số và ký tự đặc biệt.</div>
-        <button id="setPasswordSubmit" class="btn primary full" style="margin-top:14px">${isChangingPassword ? 'Cập nhật mật khẩu' : 'Lưu mật khẩu'}</button>
+        <form id="setPasswordForm" novalidate>
+          <div class="field"><label for="newPassword">Mật khẩu mới</label><div class="password-input-wrap"><input id="newPassword" type="password" autocomplete="new-password" placeholder="Ít nhất 8 ký tự" required><button class="password-toggle" type="button" data-password-toggle="newPassword" aria-label="Hiện mật khẩu" aria-pressed="false"><span aria-hidden="true">👁</span></button></div></div>
+          <div class="field"><label for="confirmPassword">Nhập lại mật khẩu</label><div class="password-input-wrap"><input id="confirmPassword" type="password" autocomplete="new-password" placeholder="Nhập lại mật khẩu" required><button class="password-toggle" type="button" data-password-toggle="confirmPassword" aria-label="Hiện mật khẩu" aria-pressed="false"><span aria-hidden="true">👁</span></button></div></div>
+          <div class="password-hint">Yêu cầu: 8+ ký tự, chữ hoa, chữ thường, số và ký tự đặc biệt.</div>
+          <button id="setPasswordSubmit" class="btn primary full" type="submit" style="margin-top:14px">${isChangingPassword ? 'Cập nhật mật khẩu' : 'Lưu mật khẩu'}</button>
+        </form>
         <div id="setPasswordResult"></div>
       </div>
     </section>
   `;
 
-  document.getElementById('setPasswordSubmit')?.addEventListener('click', setPasswordUI);
+  setupPasswordToggles();
+  document.getElementById('setPasswordForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    setPasswordUI();
+  });
 }
 
 async function setPasswordUI() {
@@ -3472,14 +4167,16 @@ function renderAccountPage() {
 
   const email = currentSession.user.email;
   const passwordSet = !needsPasswordSetup();
+  const admin = isAdmin();
   app.innerHTML = `
     <section class="page-head"><div><span class="eyebrow">Tài khoản</span><h1>Bảo mật và dữ liệu cá nhân</h1><p class="lead">Mọi dữ liệu cá nhân được lưu theo <code>user_id</code> trong Supabase và được RLS chặn không cho user khác xem.</p></div></section>
     <section class="grid two">
       <div class="card">
         <h3>Thông tin đăng nhập</h3>
         <p><strong>Email:</strong> ${escapeHTML(email)}</p>
+        <p><strong>Vai trò:</strong> ${admin ? '<span class="badge amber">Admin</span>' : 'Người dùng'}</p>
         <p><strong>Trạng thái mật khẩu:</strong> ${passwordSet ? 'Đã thiết lập' : 'Chưa thiết lập'}</p>
-        <a class="btn ${passwordSet ? 'secondary' : 'primary'}" href="#set-password">${passwordSet ? 'Đổi mật khẩu' : 'Đặt mật khẩu ngay'}</a>
+        <div class="hero-actions"><a class="btn ${passwordSet ? 'secondary' : 'primary'}" href="#set-password">${passwordSet ? 'Đổi mật khẩu' : 'Đặt mật khẩu ngay'}</a>${admin ? '<a class="btn primary" href="#admin">Mở Admin Console</a>' : ''}</div>
       </div>
       <div class="card">
         <h3>Dữ liệu gắn với tài khoản</h3>
@@ -3494,6 +4191,505 @@ function renderAccountPage() {
       </div>
     </section>
   `;
+}
+
+
+let adminUsersCache = [];
+let adminDashboardCache = null;
+
+const ADMIN_VIEW_CONFIG = Object.freeze({
+  overview: {
+    kicker: 'ADMIN OVERVIEW',
+    title: 'Tổng quan quản trị',
+    description: 'Theo dõi nhanh người dùng, Premium, giao dịch demo, AI và diễn biến BTC mới nhất.'
+  },
+  users: {
+    kicker: 'USER MANAGEMENT',
+    title: 'Quản lý người dùng',
+    description: 'Quản lý trạng thái truy cập, gói Premium, ví demo và hoạt động của từng tài khoản.'
+  },
+  activity: {
+    kicker: 'TRADING & PREMIUM',
+    title: 'Giao dịch và Premium',
+    description: 'Theo dõi các giao dịch mô phỏng, đơn Premium Sandbox và hoạt động AI gần đây.'
+  },
+  system: {
+    kicker: 'SYSTEM HEALTH',
+    title: 'Trạng thái hệ thống',
+    description: 'Kiểm tra API, cơ sở dữ liệu, độ mới dữ liệu thị trường và tiến trình đồng bộ.'
+  }
+});
+
+function getAdminView() {
+  const params = new URLSearchParams((location.hash.split('?')[1] || ''));
+  const requested = String(params.get('view') || 'overview').toLowerCase();
+  return ADMIN_VIEW_CONFIG[requested] ? requested : 'overview';
+}
+
+function adminViewHref(view) {
+  const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
+  return `#admin?view=${safeView}`;
+}
+
+async function renderAdminPage() {
+  if (!currentSession || !isAdmin()) {
+    location.hash = currentSession ? '#dashboard' : '#login?next=admin';
+    return;
+  }
+
+  const adminView = getAdminView();
+  const viewMeta = ADMIN_VIEW_CONFIG[adminView];
+
+  app.innerHTML = `
+    <section class="admin-console" aria-label="BTC BigData Admin Console">
+      <aside class="admin-console-rail">
+        <div class="admin-brand"><span>₿</span><div><strong>BitAdmin</strong><small>BTC BIGDATA</small></div></div>
+        <nav class="admin-section-nav" aria-label="Điều hướng quản trị">
+          <a href="${adminViewHref('overview')}" class="${adminView === 'overview' ? 'active' : ''}" data-admin-view-link="overview" ${adminView === 'overview' ? 'aria-current="page"' : ''}><span>▦</span>Tổng quan</a>
+          <a href="${adminViewHref('users')}" class="${adminView === 'users' ? 'active' : ''}" data-admin-view-link="users" ${adminView === 'users' ? 'aria-current="page"' : ''}><span>♙</span>Người dùng</a>
+          <a href="${adminViewHref('activity')}" class="${adminView === 'activity' ? 'active' : ''}" data-admin-view-link="activity" ${adminView === 'activity' ? 'aria-current="page"' : ''}><span>↔</span>Giao dịch & Premium</a>
+          <a href="${adminViewHref('system')}" class="${adminView === 'system' ? 'active' : ''}" data-admin-view-link="system" ${adminView === 'system' ? 'aria-current="page"' : ''}><span>◉</span>Hệ thống</a>
+        </nav>
+        <div class="admin-rail-bottom">
+          <a class="admin-rail-return" href="#dashboard"><span>←</span><b>Giao diện người dùng</b></a>
+          <div class="admin-profile-card">
+            <span class="admin-avatar">A</span>
+            <div><strong>${escapeHTML(shortEmail(currentSession.user.email))}</strong><small>Quản trị viên</small></div>
+            <button id="adminLogoutSide" class="admin-profile-logout" type="button" aria-label="Đăng xuất" title="Đăng xuất">↪</button>
+          </div>
+        </div>
+      </aside>
+      <div class="admin-console-main">
+        <header class="admin-console-header">
+          <div><span class="admin-kicker">${viewMeta.kicker}</span><h1>${viewMeta.title}</h1><p>${viewMeta.description}</p></div>
+          <div class="admin-header-actions">
+            <span id="adminMarketBadge" class="admin-market-badge">BTC/USDT · đang tải</span>
+            <button id="adminRefresh" class="btn admin-accent" type="button">↻ Làm mới</button>
+            <a class="admin-shell-action" href="#dashboard">← Trang người dùng</a>
+            <button id="adminLogout" class="admin-shell-action danger" type="button">Đăng xuất</button>
+          </div>
+        </header>
+        <div id="adminDataStatusMount" class="admin-data-status-mount" aria-live="polite"></div>
+        <main id="adminConsoleContent" class="admin-console-content" data-admin-view="${adminView}">
+          <section class="admin-loading-grid">${loadingCard(150)}${loadingCard(150)}${loadingCard(340)}</section>
+        </main>
+      </div>
+    </section>
+  `;
+
+  document.querySelectorAll('[data-admin-view-link]').forEach(link => link.addEventListener('click', event => {
+    const target = link.getAttribute('href');
+    if (target && location.hash === target) {
+      event.preventDefault();
+      resetRouteViewport();
+      document.querySelector('.admin-console-main')?.scrollTo?.({ top: 0, left: 0, behavior: 'auto' });
+    }
+  }));
+
+  document.getElementById('adminRefresh')?.addEventListener('click', () => loadAdminConsole(true, adminView));
+  const logoutAdmin = async () => {
+    if (!supabaseAuth) return;
+    try {
+      await supabaseAuth.auth.signOut();
+    } finally {
+      currentSession = null;
+      currentUserProfile = null;
+      adminDashboardCache = null;
+      adminUsersCache = [];
+      renderAuthHeader();
+      showToast('Đã đăng xuất khỏi Admin Console.');
+      location.hash = '#login';
+    }
+  };
+  document.getElementById('adminLogout')?.addEventListener('click', logoutAdmin);
+  document.getElementById('adminLogoutSide')?.addEventListener('click', logoutAdmin);
+  await loadAdminConsole(false, adminView);
+}
+
+async function loadAdminConsole(force = false, view = getAdminView()) {
+  const content = document.getElementById('adminConsoleContent');
+  const refreshButton = document.getElementById('adminRefresh');
+  if (!content) return;
+  if (force) {
+    adminDashboardCache = null;
+    adminUsersCache = [];
+    content.innerHTML = `<section class="admin-loading-grid">${loadingCard(150)}${loadingCard(150)}${loadingCard(340)}</section>`;
+  }
+  setActionBusy(refreshButton, true, 'Đang tải...');
+  try {
+    const requests = [fetchJson('/api/admin/dashboard', { timeout: 45000 })];
+    if (view === 'users') requests.push(fetchJson('/api/admin/users?limit=200', { timeout: 45000 }));
+    const results = await Promise.all(requests);
+    adminDashboardCache = results[0].data;
+    if (view === 'users') adminUsersCache = results[1]?.data?.data || [];
+    renderAdminConsoleContent(adminDashboardCache, adminUsersCache, view);
+  } catch (error) {
+    content.innerHTML = `
+      <section class="admin-error-panel">
+        <span class="badge red">Không tải được trang quản trị</span>
+        <h2>Kiểm tra migration và quyền admin</h2>
+        <p>${escapeHTML(error.message)}</p>
+        <p class="muted">Chạy phần Feature upgrade v3 trong <code>supabase/schema.sql</code>, <code>supabase/rls.sql</code> và tạo admin bằng <code>backend/scripts/create_admin.py</code>.</p>
+        <button class="btn admin-accent" id="adminRetry" type="button">Thử lại</button>
+      </section>`;
+    document.getElementById('adminRetry')?.addEventListener('click', () => loadAdminConsole(true, view));
+  } finally {
+    setActionBusy(refreshButton, false);
+  }
+}
+
+function renderAdminConsoleContent(data, users, view = getAdminView()) {
+  const content = document.getElementById('adminConsoleContent');
+  if (!content) return;
+  const safeView = ADMIN_VIEW_CONFIG[view] ? view : 'overview';
+  const summary = data?.summary || {};
+  const latest = data?.market?.latest || {};
+  const activity = data?.activity || [];
+  const system = data?.system || {};
+
+  const marketBadge = document.getElementById('adminMarketBadge');
+  if (marketBadge) marketBadge.innerHTML = `BTC/USDT <strong>${formatUSD(Number(latest.close))}</strong>`;
+  renderAdminDataStatus(system.data_freshness || {}, system.data_sync || {});
+  if (['queued', 'running'].includes(String(system.data_sync?.status || ''))) startAdminSyncPolling();
+
+  const pages = {
+    overview: `
+      <section class="admin-page admin-overview-page" aria-labelledby="adminOverviewTitle">
+        <div class="admin-page-heading">
+          <div><span class="admin-kicker">OVERVIEW</span><h2 id="adminOverviewTitle">Tình hình hệ thống hôm nay</h2><p>Tất cả số liệu quan trọng được tổng hợp trong một màn hình.</p></div>
+        </div>
+        <div class="admin-kpi-grid">
+          ${adminKpi('♙', 'Tổng người dùng', formatNumber(Number(summary.total_users || 0), 0), `${formatNumber(Number(summary.online_24h || 0), 0)} hoạt động 24h`)}
+          ${adminKpi('◆', 'Premium đang hoạt động', formatNumber(Number(summary.premium_users || 0), 0), `${formatNumber(Number(summary.successful_orders || 0), 0)} đơn thành công`)}
+          ${adminKpi('₫', 'Doanh thu Sandbox', formatVND(Number(summary.revenue_vnd || 0)), 'Dữ liệu mô phỏng, không phải tiền thật')}
+          ${adminKpi('↔', 'Giao dịch demo', formatNumber(Number(summary.trade_count || 0), 0), formatVND(Number(summary.trade_volume_vnd || 0)))}
+          ${adminKpi('AI', 'Câu hỏi AI', formatNumber(Number(summary.ai_questions || 0), 0), `${formatNumber(Number(summary.active_alerts || 0), 0)} cảnh báo đang bật`)}
+          ${adminKpi('₿', 'Giá BTC hiện tại', formatUSD(Number(latest.close)), `RSI ${formatNumber(Number(latest.rsi_14), 2)}`)}
+        </div>
+        <div class="admin-overview-grid">
+          <article class="admin-panel admin-market-panel">
+            <div class="admin-panel-head"><div><span>THỊ TRƯỜNG</span><h2>BTC/USDT · 72 giờ</h2></div><a href="#chart">Mở biểu đồ đầy đủ →</a></div>
+            <div class="admin-market-meta"><span>Low <b>${formatUSD(Number(latest.low))}</b></span><span>High <b>${formatUSD(Number(latest.high))}</b></span><span>EMA20 <b>${formatUSD(Number(latest.ema_20))}</b></span></div>
+            <div id="adminMarketChart" class="admin-market-chart"></div>
+          </article>
+          <article class="admin-panel admin-live-panel">
+            <div class="admin-panel-head"><div><span>HOẠT ĐỘNG MỚI</span><h2>Người dùng đang thao tác</h2></div></div>
+            <div class="admin-activity-list compact">${renderAdminActivity(activity.slice(0, 7))}</div>
+            <a class="admin-view-all" href="${adminViewHref('activity')}">Xem toàn bộ hoạt động</a>
+          </article>
+        </div>
+      </section>`,
+    users: `
+      <section class="admin-page admin-panel admin-users-page" aria-labelledby="adminUsersTitle">
+        <div class="admin-users-toolbar">
+          <div><span class="admin-kicker">USER MANAGEMENT</span><h2 id="adminUsersTitle">Danh sách người dùng</h2><p>Chọn một tài khoản để xem gói, ví demo và trạng thái truy cập.</p></div>
+          <div class="admin-user-filters">
+            <label class="admin-search"><span>⌕</span><input id="adminUserSearch" type="search" placeholder="Tìm email hoặc tên..."></label>
+            <select id="adminUserStatus" aria-label="Lọc trạng thái"><option value="all">Tất cả trạng thái</option><option value="active">Đang hoạt động</option><option value="suspended">Tạm khóa</option></select>
+            <select id="adminUserPlan" aria-label="Lọc gói"><option value="all">Tất cả gói</option><option value="premium">Premium</option><option value="free">Free</option></select>
+          </div>
+        </div>
+        <div class="admin-users-layout">
+          <div class="admin-table-wrap"><table class="admin-user-table"><thead><tr><th>Người dùng</th><th>Trạng thái</th><th>Gói</th><th>Ví demo</th><th>Giao dịch</th><th>Đăng nhập gần nhất</th><th></th></tr></thead><tbody id="adminUsersBody"></tbody></table></div>
+          <aside id="adminUserDetail" class="admin-user-detail"><div class="admin-empty-detail"><span>♙</span><strong>Chọn một người dùng</strong><p>Xem thông tin tài khoản, gói, ví và hoạt động demo.</p></div></aside>
+        </div>
+      </section>`,
+    activity: `
+      <section class="admin-page admin-activity-page" aria-labelledby="adminActivityTitle">
+        <div class="admin-page-heading">
+          <div><span class="admin-kicker">TRADING & PREMIUM</span><h2 id="adminActivityTitle">Nhật ký giao dịch và Premium</h2><p>Theo dõi các thao tác phát sinh từ những chức năng đang có trên website.</p></div>
+        </div>
+        <div class="admin-kpi-grid admin-activity-kpis">
+          ${adminKpi('↔', 'Tổng giao dịch demo', formatNumber(Number(summary.trade_count || 0), 0), formatVND(Number(summary.trade_volume_vnd || 0)))}
+          ${adminKpi('◆', 'Premium hoạt động', formatNumber(Number(summary.premium_users || 0), 0), `${formatNumber(Number(summary.successful_orders || 0), 0)} đơn thành công`)}
+          ${adminKpi('₫', 'Doanh thu Sandbox', formatVND(Number(summary.revenue_vnd || 0)), 'Không phải doanh thu tiền thật')}
+          ${adminKpi('AI', 'Câu hỏi AI', formatNumber(Number(summary.ai_questions || 0), 0), `${formatNumber(Number(summary.active_alerts || 0), 0)} cảnh báo đang bật`)}
+        </div>
+        <article class="admin-panel admin-activity-page-panel"><div class="admin-panel-head"><div><span>ACTIVITY LOG</span><h2>Hoạt động gần đây</h2></div></div><div class="admin-activity-list">${renderAdminActivity(activity)}</div></article>
+      </section>`,
+    system: `
+      <section class="admin-page admin-system-page" aria-labelledby="adminSystemTitle">
+        <div class="admin-page-heading">
+          <div><span class="admin-kicker">SYSTEM HEALTH</span><h2 id="adminSystemTitle">Trạng thái vận hành</h2><p>Kiểm tra sức khỏe API, cơ sở dữ liệu và độ đầy đủ của dữ liệu 72 giờ.</p></div>
+        </div>
+        <article class="admin-panel admin-system-panel admin-system-page-panel"><div class="admin-panel-head"><div><span>LIVE STATUS</span><h2>Hạ tầng BTC BigData</h2></div><span class="admin-health-ok">● ${system.api === 'operational' ? 'API hoạt động' : 'Cần kiểm tra'}</span></div>${renderAdminSystem(system, summary)}</article>
+      </section>`
+  };
+
+  content.innerHTML = pages[safeView];
+  content.dataset.adminView = safeView;
+
+  if (safeView === 'users') setupAdminUserTable(users);
+  if (safeView === 'overview') drawAdminMarketChart(data?.market?.series || []);
+
+  resetRouteViewport();
+}
+
+function renderAdminDataStatus(freshness = {}, sync = {}) {
+  const mount = document.getElementById('adminDataStatusMount');
+  if (!mount) return;
+
+  const syncStatus = String(sync.status || 'idle');
+  const syncing = syncStatus === 'queued' || syncStatus === 'running';
+  const dataState = String(freshness.state || 'missing');
+  const visualState = syncing ? 'syncing' : dataState;
+  const labels = {
+    fresh: 'Dữ liệu đúng lịch',
+    late: 'Dữ liệu đang trễ',
+    stale: 'Dữ liệu quá cũ',
+    missing: 'Chưa có dữ liệu',
+    syncing: 'Đang đồng bộ dữ liệu'
+  };
+  const icons = { fresh: '✓', late: '!', stale: '!', missing: '?', syncing: '↻' };
+  const ohlcvAge = Number(freshness.ohlcv?.age_hours);
+  const p2pAge = Number(freshness.p2p?.age_hours);
+  const threshold = Math.max(0.1, Number(freshness.threshold_hours || 2));
+  const latestTimestamp = freshness.ohlcv?.timestamp;
+  const ageForMeter = Number.isFinite(ohlcvAge) ? ohlcvAge : threshold * 3;
+  const freshnessPercent = syncing ? 100 : Math.max(6, Math.min(100, 100 - (ageForMeter / (threshold * 3)) * 100));
+  const needsSync = Boolean(freshness.needs_sync) || dataState !== 'fresh';
+  const syncFailed = syncStatus === 'failed';
+  const message = syncFailed
+    ? `${sync.message || 'Đồng bộ thất bại.'}${sync.error ? ` ${sync.error}` : ''}`
+    : syncing
+      ? (sync.message || 'Đang lấy dữ liệu mới và cập nhật Supabase...')
+      : (freshness.message || 'Đang kiểm tra độ mới dữ liệu.');
+  const latestText = latestTimestamp ? formatVNTime(latestTimestamp) : 'Chưa có';
+  const actionLabel = syncing ? 'Đang đồng bộ...' : needsSync ? '↻ Đồng bộ dữ liệu ngay' : '↻ Đồng bộ lại';
+
+  mount.innerHTML = `
+    <section class="admin-data-status ${escapeHTML(visualState)} ${syncFailed ? 'failed' : ''}">
+      <div class="admin-data-status-icon" aria-hidden="true">${icons[visualState] || '!'}</div>
+      <div class="admin-data-status-copy">
+        <div class="admin-data-status-title"><span>DATA FRESHNESS</span><strong>${labels[visualState] || labels.missing}</strong></div>
+        <p>${escapeHTML(message)}</p>
+        <div class="admin-data-source-row">
+          <span>OHLCV: <b>${ageText(ohlcvAge)}</b></span>
+          <span>P2P: <b>${ageText(p2pAge)}</b></span>
+          <span>Ngưỡng cho phép: <b>${formatNumber(threshold, 1)} giờ</b></span>
+        </div>
+        <div class="admin-data-meter" aria-label="Mức độ mới của dữ liệu"><span style="width:${freshnessPercent}%"></span></div>
+      </div>
+      <div class="admin-data-status-actions">
+        <small>Cập nhật gần nhất</small>
+        <strong>${escapeHTML(latestText)}</strong>
+        <button id="adminSyncNow" class="btn ${needsSync ? 'admin-sync-urgent' : 'admin-sync-secondary'}" type="button" ${syncing ? 'disabled aria-busy="true"' : ''}>${actionLabel}</button>
+      </div>
+    </section>`;
+
+  document.getElementById('adminSyncNow')?.addEventListener('click', startAdminDataSync);
+}
+
+async function startAdminDataSync() {
+  const button = document.getElementById('adminSyncNow');
+  setActionBusy(button, true, 'Đang gửi yêu cầu...');
+  try {
+    const response = await fetchJson('/api/admin/data-sync', {
+      method: 'POST',
+      timeout: 20000
+    });
+    renderAdminDataStatus(response.data?.data || {}, response.data?.sync || {});
+    showToast('Đã bắt đầu đồng bộ dữ liệu thị trường.');
+    startAdminSyncPolling();
+  } catch (error) {
+    if (String(error.message || '').toLowerCase().includes('đang chạy')) {
+      showToast('Tiến trình đồng bộ đang chạy, hệ thống sẽ tiếp tục theo dõi.');
+      startAdminSyncPolling();
+      return;
+    }
+    setActionBusy(button, false);
+    showToast(`Không thể bắt đầu đồng bộ: ${error.message}`);
+  }
+}
+
+function startAdminSyncPolling() {
+  stopAdminSyncPolling();
+  let attempts = 0;
+  const poll = async () => {
+    if (activeRoute !== 'admin') {
+      stopAdminSyncPolling();
+      return;
+    }
+    attempts += 1;
+    try {
+      const response = await fetchJson('/api/admin/data-sync/status', { timeout: 20000 });
+      const sync = response.data?.sync || {};
+      const freshness = response.data?.data || {};
+      renderAdminDataStatus(freshness, sync);
+      const status = String(sync.status || 'idle');
+      if (status === 'queued' || status === 'running') {
+        if (attempts < 150) adminSyncPollTimer = window.setTimeout(poll, 2000);
+        else showToast('Đồng bộ đang mất nhiều thời gian. Bạn có thể làm mới Admin Console sau.');
+        return;
+      }
+      stopAdminSyncPolling();
+      if (status === 'success') {
+        showToast(sync.message || 'Đồng bộ dữ liệu hoàn tất.');
+        await loadAdminConsole(true);
+      } else if (status === 'failed') {
+        showToast(sync.error ? `Đồng bộ thất bại: ${sync.error}` : 'Đồng bộ dữ liệu thất bại.');
+      }
+    } catch (error) {
+      if (attempts < 8) {
+        adminSyncPollTimer = window.setTimeout(poll, 2500);
+      } else {
+        stopAdminSyncPolling();
+        showToast(`Không đọc được trạng thái đồng bộ: ${error.message}`);
+      }
+    }
+  };
+  adminSyncPollTimer = window.setTimeout(poll, 900);
+}
+
+function adminKpi(icon, label, value, note) {
+  return `<article class="admin-kpi"><span class="admin-kpi-icon">${escapeHTML(icon)}</span><div><small>${escapeHTML(label)}</small><strong>${value}</strong><p>${note}</p></div></article>`;
+}
+
+function renderAdminActivity(items) {
+  if (!items?.length) return `<div class="admin-empty-row">Chưa có hoạt động mới.</div>`;
+  return items.map(item => {
+    const type = String(item.type || 'system');
+    const icon = type === 'premium' ? '◆' : type === 'trade' ? '↔' : type === 'ai' ? 'AI' : '•';
+    const amount = Number(item.amount_vnd);
+    return `<div class="admin-activity-item"><span class="admin-activity-icon ${escapeHTML(type)}">${icon}</span><div><strong>${escapeHTML(item.title || 'Hoạt động')}</strong><p>${escapeHTML(item.detail || '')}${Number.isFinite(amount) ? ` · ${formatVND(amount)}` : ''}</p></div><span class="admin-activity-status ${escapeHTML(String(item.status || ''))}">${escapeHTML(String(item.status || ''))}</span><time>${escapeHTML(formatVNTime(item.created_at, 'short'))}</time></div>`;
+  }).join('');
+}
+
+function renderAdminSystem(system, summary) {
+  const databaseOk = system.database === 'operational';
+  const dataPoints = Number(system.data_points || 0);
+  const apiHealth = system.api === 'operational' ? 100 : 0;
+  const dbHealth = databaseOk ? 100 : 0;
+  const dataHealth = Math.min(100, Math.round((dataPoints / 72) * 100));
+  return `
+    <div class="admin-health-rings">
+      ${adminHealthRing(apiHealth, 'API')}
+      ${adminHealthRing(dbHealth, 'Database')}
+      ${adminHealthRing(dataHealth, 'Dữ liệu 72h')}
+    </div>
+    <div class="admin-system-lines">
+      <div><span>Môi trường</span><b>${escapeHTML(system.environment || 'development')}</b></div>
+      <div><span>AI Provider</span><b>${escapeHTML(system.ai_provider || 'mock')}</b></div>
+      <div><span>Ví demo toàn hệ thống</span><b>${formatVND(Number(summary.wallet_balance_vnd || 0))}</b></div>
+      <div><span>Kiểm tra lúc</span><b>${escapeHTML(formatVNTime(system.checked_at))}</b></div>
+    </div>`;
+}
+
+function adminHealthRing(value, label) {
+  const safe = Math.max(0, Math.min(100, Number(value) || 0));
+  return `<div class="admin-health-ring" style="--health:${safe * 3.6}deg"><div><strong>${safe}%</strong></div><span>${escapeHTML(label)}</span></div>`;
+}
+
+function setupAdminUserTable(users) {
+  const search = document.getElementById('adminUserSearch');
+  const status = document.getElementById('adminUserStatus');
+  const plan = document.getElementById('adminUserPlan');
+  const apply = () => {
+    const needle = String(search?.value || '').trim().toLowerCase();
+    const statusValue = status?.value || 'all';
+    const planValue = plan?.value || 'all';
+    const filtered = users.filter(user => {
+      const matchesSearch = !needle || String(user.email || '').toLowerCase().includes(needle) || String(user.full_name || '').toLowerCase().includes(needle);
+      const matchesStatus = statusValue === 'all' || String(user.status || 'active') === statusValue;
+      const matchesPlan = planValue === 'all' || (planValue === 'premium' ? user.premium_active : !user.premium_active);
+      return matchesSearch && matchesStatus && matchesPlan;
+    });
+    renderAdminUsersRows(filtered);
+  };
+  search?.addEventListener('input', apply);
+  status?.addEventListener('change', apply);
+  plan?.addEventListener('change', apply);
+  apply();
+}
+
+function renderAdminUsersRows(users) {
+  const body = document.getElementById('adminUsersBody');
+  if (!body) return;
+  if (!users.length) {
+    body.innerHTML = `<tr><td colspan="7"><div class="admin-empty-row">Không tìm thấy người dùng phù hợp.</div></td></tr>`;
+    return;
+  }
+  body.innerHTML = users.map(user => {
+    const active = String(user.status || 'active') === 'active';
+    const name = user.full_name || shortEmail(user.email || 'Người dùng');
+    return `<tr tabindex="0" data-admin-user-row="${escapeHTML(user.user_id)}"><td><div class="admin-user-identity"><span>${escapeHTML(String(name).charAt(0).toUpperCase())}</span><div><strong>${escapeHTML(name)}</strong><small>${escapeHTML(user.email || '')}${user.role === 'admin' ? ' · ADMIN' : ''}</small></div></div></td><td><span class="admin-status ${active ? 'active' : 'suspended'}">● ${active ? 'Đang hoạt động' : 'Tạm khóa'}</span></td><td><span class="admin-plan ${user.premium_active ? 'premium' : 'free'}">${user.premium_active ? '★ PREMIUM' : 'FREE'}</span></td><td>${formatVND(Number(user.wallet_balance_vnd || 0))}</td><td>${formatNumber(Number(user.trade_count || 0), 0)}</td><td>${user.last_login_at ? escapeHTML(formatVNTime(user.last_login_at, 'short')) : 'Chưa có'}</td><td><button class="admin-row-action" type="button" aria-label="Xem chi tiết">›</button></td></tr>`;
+  }).join('');
+
+  body.querySelectorAll('[data-admin-user-row]').forEach(row => {
+    const open = () => showAdminUserDetail(row.dataset.adminUserRow);
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        open();
+      }
+    });
+  });
+}
+
+function showAdminUserDetail(userId) {
+  const user = adminUsersCache.find(item => String(item.user_id) === String(userId));
+  const detail = document.getElementById('adminUserDetail');
+  if (!user || !detail) return;
+  const active = String(user.status || 'active') === 'active';
+  const isSelf = String(user.user_id) === String(currentSession?.user?.id);
+  detail.innerHTML = `
+    <div class="admin-detail-head"><span>${escapeHTML(String(user.full_name || user.email || 'U').charAt(0).toUpperCase())}</span><div><strong>${escapeHTML(user.full_name || shortEmail(user.email || 'Người dùng'))}</strong><small>${escapeHTML(user.email || '')}</small></div></div>
+    <div class="admin-detail-grid">
+      <div><span>Vai trò</span><b>${user.role === 'admin' ? 'Admin' : 'Người dùng'}</b></div>
+      <div><span>Trạng thái</span><b>${active ? 'Đang hoạt động' : 'Tạm khóa'}</b></div>
+      <div><span>Gói hiện tại</span><b>${user.premium_active ? 'Premium' : 'Free'}</b></div>
+      <div><span>Số dư ví demo</span><b>${formatVND(Number(user.wallet_balance_vnd || 0))}</b></div>
+      <div><span>Số giao dịch</span><b>${formatNumber(Number(user.trade_count || 0), 0)}</b></div>
+      <div><span>Ngày tạo</span><b>${user.created_at ? escapeHTML(formatVNTime(user.created_at, 'short')) : '—'}</b></div>
+    </div>
+    <div class="admin-detail-note">Admin chỉ quản lý trạng thái truy cập. Mật khẩu do Supabase Auth quản lý và không hiển thị tại đây.</div>
+    <button id="adminToggleUserStatus" class="btn ${active ? 'danger' : 'admin-accent'} full" type="button" ${isSelf ? 'disabled title="Không thể tự khóa tài khoản"' : ''}>${active ? 'Tạm khóa tài khoản' : 'Mở khóa tài khoản'}</button>`;
+  document.getElementById('adminToggleUserStatus')?.addEventListener('click', () => updateAdminUserStatus(user, active ? 'suspended' : 'active'));
+}
+
+async function updateAdminUserStatus(user, nextStatus) {
+  const button = document.getElementById('adminToggleUserStatus');
+  const action = nextStatus === 'suspended' ? 'tạm khóa' : 'mở khóa';
+  if (!window.confirm(`Xác nhận ${action} tài khoản ${user.email}?`)) return;
+  setActionBusy(button, true, 'Đang cập nhật...');
+  try {
+    await fetchJson(`/api/admin/users/${encodeURIComponent(user.user_id)}/status`, {
+      method: 'PATCH',
+      body: { status: nextStatus },
+      timeout: 30000
+    });
+    user.status = nextStatus;
+    showToast(`Đã ${action} tài khoản ${user.email}.`);
+    renderAdminUsersRows(adminUsersCache);
+    showAdminUserDetail(user.user_id);
+  } catch (error) {
+    showToast(error.message);
+    setActionBusy(button, false);
+  }
+}
+
+function drawAdminMarketChart(rows) {
+  const el = document.getElementById('adminMarketChart');
+  if (!el || !window.echarts || !rows?.length) return;
+  const chart = echarts.init(el);
+  charts.push(chart);
+  const labels = rows.map(row => formatVNTime(row.timestamp, 'short'));
+  chart.setOption({
+    animation: false,
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    legend: { top: 4, right: 8, textStyle: { color: '#b9c1d3' }, data: ['OHLC', 'EMA20', 'EMA50'] },
+    grid: { left: 48, right: 24, top: 42, bottom: 36 },
+    xAxis: { type: 'category', data: labels, boundaryGap: true, axisLabel: { color: '#75809a', hideOverlap: true }, axisLine: { lineStyle: { color: '#263044' } } },
+    yAxis: { scale: true, axisLabel: { color: '#75809a', formatter: value => `$${Math.round(value / 1000)}k` }, splitLine: { lineStyle: { color: 'rgba(117,128,154,.12)' } } },
+    dataZoom: [{ type: 'inside', start: 25, end: 100 }],
+    series: [
+      { name: 'OHLC', type: 'candlestick', data: rows.map(row => [row.open, row.close, row.low, row.high]), itemStyle: { color: '#20d5a4', color0: '#ff7f8c', borderColor: '#20d5a4', borderColor0: '#ff7f8c' } },
+      { name: 'EMA20', type: 'line', data: rows.map(row => row.ema_20), showSymbol: false, smooth: true, lineStyle: { width: 1.7, color: '#ffb873' } },
+      { name: 'EMA50', type: 'line', data: rows.map(row => row.ema_50), showSymbol: false, smooth: true, lineStyle: { width: 1.4, color: '#5dc9ff' } }
+    ]
+  });
 }
 
 function renderSettlementPage() {

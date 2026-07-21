@@ -45,6 +45,8 @@ def root():
             "/api/ai/history?limit=24",
             "/api/wallet/me",
             "/api/wallet/topup/create",
+            "/api/admin/dashboard",
+            "/api/admin/users",
         ],
     }
 

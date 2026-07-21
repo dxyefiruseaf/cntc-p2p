@@ -1132,14 +1132,40 @@ function enhanceTechnicalChartAdvice() {
 function installEnterToSubmit() {
   if (window.__btcEnterSubmitInstalled) return;
   window.__btcEnterSubmitInstalled = true;
+  const inputToButton = {
+    taxAmount: 'taxSubmit',
+    taxCountry: 'taxSubmit',
+    holdingDays: 'taxSubmit',
+    tradeAmount: 'tradePreviewBtn',
+    tradePriceSource: 'tradePreviewBtn',
+    settleAmount: 'settleSubmit',
+    settleUnit: 'settleSubmit',
+    settleSide: 'settleSubmit',
+    settlePriceSource: 'settleSubmit',
+    settleCountry: 'settleSubmit',
+    settleHolding: 'settleSubmit',
+    alertThreshold: 'alertCreate',
+    walletAmount: 'walletCreateTopup',
+    planAmount: 'buildPlanBtn',
+    planUnit: 'buildPlanBtn',
+    planRisk: 'buildPlanBtn',
+    pfAmount: 'pfAddBtn',
+    pfNote: 'pfAddBtn',
+    alertValue: 'alertAddBtn',
+    realBtc: 'realCalcBtn',
+    realFee: 'realCalcBtn',
+    realTax: 'realCalcBtn',
+    aiDecisionQuestion: 'aiDecisionBtn'
+  };
   document.addEventListener('keydown', event => {
     if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
-    if (!target.matches('input, select')) return;
-    const scope = target.closest('form, .card, .decision-card, .paper-card, .auth-panel, .auth-card, section, article');
-    if (!scope) return;
-    const button = scope.querySelector('button[type="submit"], button.btn.primary, button.btn.accent, button[id$="Btn"], button:not([disabled])');
+    if (!target.matches('input, select') || target.closest('form')) return;
+    const targetSelector = target.dataset.enterSubmit || target.closest('[data-enter-submit]')?.dataset.enterSubmit;
+    const buttonId = targetSelector?.replace(/^#/, '') || inputToButton[target.id];
+    if (!buttonId) return;
+    const button = document.getElementById(buttonId);
     if (!button || button.disabled) return;
     event.preventDefault();
     button.click();
