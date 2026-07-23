@@ -8,7 +8,7 @@ export const supabase: SupabaseClient | null = url && anonKey
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true,
+        detectSessionInUrl: false,
         flowType: 'pkce',
       },
       realtime: {

@@ -5,6 +5,8 @@ import { useAuth } from '../context/AuthContext';
 
 type Mode = 'password' | 'otp' | 'verify';
 
+const RESEND_SECONDS = 60;
+
 export default function Login() {
   const auth = useAuth();
   const navigate = useNavigate();
@@ -15,35 +17,65 @@ export default function Login() {
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [resendIn, setResendIn] = useState(0);
   const nextPath = String((location.state as { from?: string } | null)?.from || '/dashboard');
 
   useEffect(() => {
     if (auth.ready && auth.isAuthenticated) navigate(nextPath, { replace: true });
   }, [auth.ready, auth.isAuthenticated, navigate, nextPath]);
 
+  useEffect(() => {
+    if (resendIn <= 0) return undefined;
+    const timer = window.setInterval(() => {
+      setResendIn(value => Math.max(0, value - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendIn]);
+
+  const switchMode = (nextMode: Mode) => {
+    setMode(nextMode);
+    setError('');
+    setNotice('');
+    if (nextMode !== 'verify') setOtp('');
+  };
+
   const run = async (action: () => Promise<void>) => {
     setLoading(true);
     setError('');
-    try { await action(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'Không thể xác thực tài khoản.'); }
-    finally { setLoading(false); }
+    try {
+      await action();
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : 'Không thể xác thực tài khoản.';
+      setError(message.toLowerCase().includes('invalid login credentials')
+        ? 'Email hoặc mật khẩu không đúng.'
+        : message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const login = () => void run(async () => {
-    if (!email.trim() || !password) throw new Error('Vui lòng nhập email và mật khẩu.');
-    await auth.signIn(email.trim(), password);
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !password) throw new Error('Vui lòng nhập email và mật khẩu.');
+    await auth.signIn(normalizedEmail, password);
     navigate(nextPath, { replace: true });
   });
 
   const sendOtp = () => void run(async () => {
-    if (!email.trim()) throw new Error('Vui lòng nhập email.');
-    await auth.sendOtp(email.trim());
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) throw new Error('Vui lòng nhập email.');
+    await auth.sendOtp(normalizedEmail);
+    setEmail(normalizedEmail);
+    setOtp('');
+    setResendIn(RESEND_SECONDS);
+    setNotice(`Mã OTP đã được gửi tới ${normalizedEmail}.`);
     setMode('verify');
   });
 
   const verify = () => void run(async () => {
-    if (!/^\d{6,8}$/.test(otp.trim())) throw new Error('Mã xác minh chưa hợp lệ.');
-    await auth.verifyOtp(email.trim(), otp.trim());
+    if (!/^\d{6,8}$/.test(otp.trim())) throw new Error('Mã OTP phải gồm từ 6 đến 8 chữ số.');
+    await auth.verifyOtp(email.trim().toLowerCase(), otp.trim());
     navigate(nextPath, { replace: true });
   });
 
@@ -60,26 +92,36 @@ export default function Login() {
         <section className="rounded-3xl border border-[var(--border)] bg-[var(--surface)]/95 p-6 shadow-2xl backdrop-blur-xl">
           <div className="mb-5 rounded-xl border border-[#F7931A]/20 bg-[#F7931A]/[.07] px-3 py-2 text-center text-xs font-semibold text-[#F7931A]">Môi trường Sandbox — Không giao dịch tiền thật</div>
           <div className="mb-5 grid grid-cols-2 rounded-xl bg-[var(--surface-2)] p-1">
-            <button className={`segment-btn ${mode === 'password' ? 'active' : ''}`} onClick={() => setMode('password')}>Mật khẩu</button>
-            <button className={`segment-btn ${mode !== 'password' ? 'active' : ''}`} onClick={() => setMode('otp')}>OTP Email</button>
+            <button type="button" className={`segment-btn ${mode === 'password' ? 'active' : ''}`} onClick={() => switchMode('password')}>Mật khẩu</button>
+            <button type="button" className={`segment-btn ${mode !== 'password' ? 'active' : ''}`} onClick={() => switchMode('otp')}>OTP Email</button>
           </div>
+
           {error && <div className="mb-4 rounded-xl border border-[#EF4444]/25 bg-[#EF4444]/10 px-3 py-2 text-sm text-[#EF4444]">{error}</div>}
+          {notice && <div className="mb-4 rounded-xl border border-[#22C55E]/25 bg-[#22C55E]/10 px-3 py-2 text-sm text-[#22C55E]">{notice}</div>}
+
           {mode === 'password' && <div className="card-reveal space-y-4">
             <Input label="Email" type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} placeholder="email@example.com" />
             <Input label="Mật khẩu" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} placeholder="••••••••" onKeyDown={event => { if (event.key === 'Enter') login(); }} />
-            <Button loading={loading} className="w-full primary-glow" onClick={login}>Đăng nhập</Button>
-            <button className="mx-auto block text-xs text-[var(--text-sec)] hover:text-[#F7931A]" onClick={() => setMode('otp')}>Đăng nhập hoặc khôi phục bằng OTP</button>
+            <Button loading={loading} className="w-full primary-glow" onClick={login}>Đăng nhập bằng mật khẩu</Button>
+            <button type="button" className="mx-auto block text-xs text-[var(--text-sec)] hover:text-[#F7931A]" onClick={() => switchMode('otp')}>Quên mật khẩu hoặc chưa có mật khẩu? Dùng OTP</button>
           </div>}
+
           {mode === 'otp' && <div className="card-reveal space-y-4">
-            <Input label="Email nhận mã" type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} placeholder="email@example.com" />
-            <Button loading={loading} className="w-full primary-glow" onClick={sendOtp}>Gửi mã xác minh</Button>
-            <p className="text-center text-xs leading-relaxed text-[var(--text-sec)]">Mã OTP hoặc liên kết đăng nhập sẽ được gửi theo cấu hình Supabase Auth của project.</p>
+            <Input label="Email nhận mã" type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} placeholder="email@example.com" onKeyDown={event => { if (event.key === 'Enter') sendOtp(); }} />
+            <Button loading={loading} className="w-full primary-glow" onClick={sendOtp}>Gửi mã OTP</Button>
+            <p className="text-center text-xs leading-relaxed text-[var(--text-sec)]">Mã OTP dùng để đăng nhập hoặc đăng ký tài khoản. Sau khi đăng nhập, bạn có thể tạo hay đổi mật khẩu trong trang Tài khoản.</p>
           </div>}
+
           {mode === 'verify' && <div className="card-reveal space-y-4">
-            <p className="text-sm text-[var(--text-sec)]">Nhập mã đã gửi tới <strong className="text-[var(--text-main)]">{email}</strong>.</p>
-            <Input label="Mã OTP" inputMode="numeric" maxLength={8} value={otp} onChange={event => setOtp(event.target.value.replace(/\D/g, ''))} placeholder="000000" onKeyDown={event => { if (event.key === 'Enter') verify(); }} />
+            <p className="text-sm text-[var(--text-sec)]">Nhập mã OTP đã gửi tới <strong className="text-[var(--text-main)]">{email}</strong>.</p>
+            <Input label="Mã OTP" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={otp} onChange={event => setOtp(event.target.value.replace(/\D/g, ''))} placeholder="000000" onKeyDown={event => { if (event.key === 'Enter') verify(); }} />
             <Button loading={loading} className="w-full primary-glow" onClick={verify}>Xác minh và đăng nhập</Button>
-            <button className="mx-auto block text-xs text-[var(--text-sec)] hover:text-[#F7931A]" onClick={() => setMode('otp')}>Gửi lại mã</button>
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <button type="button" className="text-[var(--text-sec)] hover:text-[#F7931A]" onClick={() => switchMode('otp')}>Đổi email</button>
+              <button type="button" disabled={loading || resendIn > 0} className="text-[var(--text-sec)] hover:text-[#F7931A] disabled:cursor-not-allowed disabled:opacity-50" onClick={sendOtp}>
+                {resendIn > 0 ? `Gửi lại sau ${resendIn}s` : 'Gửi lại mã OTP'}
+              </button>
+            </div>
           </div>}
         </section>
         <div className="mt-4"><Disclaimer text="Nền tảng phục vụ học tập, nghiên cứu và trình diễn công nghệ. Không vận hành sàn giao dịch thật và không lưu ký tài sản." /></div>

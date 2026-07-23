@@ -130,7 +130,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const updatePassword = useCallback(async (password: string) => {
     if (!supabase) throw new Error('Supabase Auth chưa được cấu hình.');
-    const { error } = await supabase.auth.updateUser({ password });
+    const { error } = await supabase.auth.updateUser({
+      password,
+      data: { password_set: true, password_updated_at: new Date().toISOString() },
+    });
     if (error) throw error;
   }, []);
 
