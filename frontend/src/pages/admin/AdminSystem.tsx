@@ -10,6 +10,7 @@ type SyncState = {
   finished_at?: string | null;
   message?: string;
   error?: string | null;
+  warning?: string | null;
   duration_seconds?: number | null;
   output_tail?: string | null;
 };
@@ -79,6 +80,9 @@ export default function AdminSystem() {
         clearApiCache();
         if (nextStatus === 'success') {
           showToast(payload.sync?.message || 'Đồng bộ dữ liệu thành công.', 'success', 4500);
+          if (payload.sync?.warning) {
+            window.setTimeout(() => showToast(payload.sync?.warning || '', 'warning', 6500), 250);
+          }
         } else if (nextStatus === 'failed') {
           showToast(payload.sync?.error || payload.sync?.message || 'Đồng bộ dữ liệu thất bại.', 'error', 6000);
         }
@@ -183,6 +187,17 @@ export default function AdminSystem() {
                 <div className={`rounded-xl border p-3 text-sm ${syncStatus === 'failed' ? 'border-[#EF4444]/30 bg-[#EF4444]/[0.07] text-[#FCA5A5]' : syncStatus === 'success' ? 'border-[#22C55E]/30 bg-[#22C55E]/[0.07] text-[#86EFAC]' : 'border-[var(--border-soft)] bg-[var(--surface-2)] text-[var(--text-sec)]'}`}>
                   {String(sync.error || sync.message || 'Chưa có tiến trình đang chạy.')}
                 </div>
+                {sync.warning && (
+                  <div className="rounded-xl border border-[#F59E0B]/30 bg-[#F59E0B]/[0.07] p-3 text-sm text-[#FCD34D]">
+                    <strong>Cảnh báo tác vụ phụ:</strong> {sync.warning}
+                  </div>
+                )}
+                {(syncStatus === 'failed' || Boolean(sync.warning)) && sync.output_tail && (
+                  <details className="rounded-xl border border-[var(--border-soft)] bg-[var(--surface-2)] p-3 text-xs text-[var(--text-sec)]">
+                    <summary className="cursor-pointer select-none font-semibold text-[var(--text)]">Xem chi tiết kỹ thuật</summary>
+                    <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono leading-relaxed">{sync.output_tail}</pre>
+                  </details>
+                )}
               </div>
             </Card>
           </section>

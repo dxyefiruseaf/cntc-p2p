@@ -7,6 +7,7 @@ from typing import Any, Callable
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -53,6 +54,7 @@ _DATA_SYNC_STATE: dict[str, Any] = {
     "requested_by": None,
     "message": "Chưa có yêu cầu đồng bộ thủ công.",
     "error": None,
+    "warning": None,
     "output_tail": None,
     "job_id": None,
     "duration_seconds": None,
@@ -278,6 +280,21 @@ def _sync_state_snapshot() -> dict[str, Any]:
         _load_sync_state_unlocked()
         status = str(_DATA_SYNC_STATE.get("status") or "idle").lower()
         started_at = _DATA_SYNC_STATE.get("started_at")
+
+        # Reconcile states written by older deployments: those versions marked
+        # the whole job as failed when an auxiliary alert task crashed after the
+        # OHLCV/P2P upsert had already completed.
+        if status == "failed" and _core_sync_completed(_DATA_SYNC_STATE.get("output_tail")):
+            previous_error = str(_DATA_SYNC_STATE.get("error") or "").strip()
+            _DATA_SYNC_STATE.update({
+                "status": "success",
+                "message": "Dữ liệu thị trường đã đồng bộ thành công; tác vụ phụ có cảnh báo.",
+                "error": None,
+                "warning": previous_error or "Một tác vụ phụ sau đồng bộ đã gặp lỗi.",
+            })
+            status = "success"
+            _write_sync_state_unlocked()
+
         if status in {"queued", "running"} and started_at:
             try:
                 started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
@@ -291,6 +308,7 @@ def _sync_state_snapshot() -> dict[str, Any]:
                         "duration_seconds": round(elapsed, 1),
                         "message": "Tiến trình đồng bộ không phản hồi và đã được tự động kết thúc.",
                         "error": "Quá thời gian theo dõi tiến trình đồng bộ.",
+                        "warning": None,
                     })
                     _write_sync_state_unlocked()
             except (TypeError, ValueError):
@@ -841,8 +859,50 @@ def _users_data(page: int, limit: int, search: str, status: str, plan: str) -> d
     }
 
 
+def _friendly_sync_error(output: str | None) -> str:
+    text = (output or "").lower()
+    if "451" in text and "binance" in text:
+        return (
+            "Binance từ chối endpoint api.binance.com đối với IP/region của Render (HTTP 451). "
+            "Hãy dùng BINANCE_API_BASE=https://data-api.binance.vision rồi chạy lại đồng bộ."
+        )
+    if "timed out" in text or "timeout" in text:
+        return "Nguồn dữ liệu phản hồi quá chậm. Hãy thử lại sau ít phút."
+    if "supabase" in text and ("401" in text or "403" in text):
+        return "Không thể ghi Supabase. Hãy kiểm tra SUPABASE_URL và SUPABASE_SERVICE_ROLE_KEY trên Render."
+    return "Đồng bộ dữ liệu thất bại. Mở chi tiết kỹ thuật để xem nguyên nhân."
+
+
+def _core_sync_completed(output: str | None) -> bool:
+    """Return True only after the script confirms the market-data upsert finished.
+
+    Auxiliary work (for example alert email checks) runs after this marker. A
+    failure in an auxiliary step must not turn an already committed market-data
+    sync into a failed job. The legacy regex keeps older script output usable.
+    """
+    text = output or ""
+    if "CORE_SYNC_SUCCESS=1" in text:
+        return True
+    match = re.search(r"Upserted OHLCV rows:\s*(\d+)", text, flags=re.IGNORECASE)
+    return bool(match and int(match.group(1)) > 0 and "Latest OHLCV timestamp:" in text)
+
+
+def _post_sync_warning(output: str | None, return_code: int) -> str | None:
+    text = output or ""
+    marker = re.search(r"POST_SYNC_WARNING=(.+)", text)
+    if marker:
+        return marker.group(1).strip()[:600]
+    if return_code != 0 and _core_sync_completed(text):
+        return (
+            "Dữ liệu thị trường đã được ghi thành công, nhưng một tác vụ phụ sau đồng bộ "
+            "gặp lỗi. Dữ liệu biểu đồ vẫn sử dụng được; hãy mở chi tiết kỹ thuật nếu cần."
+        )
+    return None
+
+
 def _run_manual_sync(requested_by: str | None, job_id: str) -> None:
     started_at = datetime.now(timezone.utc)
+    output_tail: str | None = None
     _set_sync_state(
         status="running",
         job_id=job_id,
@@ -851,6 +911,7 @@ def _run_manual_sync(requested_by: str | None, job_id: str) -> None:
         requested_by=requested_by,
         message="Đang lấy dữ liệu mới và cập nhật Supabase...",
         error=None,
+        warning=None,
         output_tail=None,
         duration_seconds=None,
     )
@@ -871,22 +932,33 @@ def _run_manual_sync(requested_by: str | None, job_id: str) -> None:
         )
         combined = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part and part.strip())
         output_tail = combined[-3000:] if combined else None
-        if result.returncode != 0:
-            raise RuntimeError(output_tail or f"Script kết thúc với mã lỗi {result.returncode}")
+        core_completed = _core_sync_completed(combined)
+        warning = _post_sync_warning(combined, result.returncode)
+
+        # Only fail when the market-data upsert itself did not complete. An
+        # alert/email or other post-sync task may fail after Supabase already
+        # contains the new rows; that case is a successful sync with a warning.
+        if result.returncode != 0 and not core_completed:
+            raise RuntimeError(_friendly_sync_error(output_tail))
+
         _invalidate_admin_cache()
         freshness = _data_freshness(force=True)
         finished_at = datetime.now(timezone.utc)
+        if warning:
+            message = "Dữ liệu thị trường đã đồng bộ thành công; tác vụ phụ có cảnh báo."
+        elif freshness.get("state") == "fresh":
+            message = "Đồng bộ hoàn tất và dữ liệu đã trở lại trạng thái mới."
+        else:
+            message = "Đồng bộ hoàn tất nhưng dữ liệu vẫn chưa đạt ngưỡng mới; hãy kiểm tra nguồn dữ liệu."
+
         _set_sync_state(
             status="success",
             job_id=job_id,
             finished_at=finished_at.isoformat(),
             duration_seconds=round((finished_at - started_at).total_seconds(), 1),
-            message=(
-                "Đồng bộ hoàn tất và dữ liệu đã trở lại trạng thái mới."
-                if freshness.get("state") == "fresh"
-                else "Đồng bộ hoàn tất nhưng dữ liệu vẫn chưa đạt ngưỡng mới; hãy kiểm tra nguồn dữ liệu."
-            ),
+            message=message,
             error=None,
+            warning=warning,
             output_tail=output_tail,
         )
     except subprocess.TimeoutExpired as exc:
@@ -898,6 +970,7 @@ def _run_manual_sync(requested_by: str | None, job_id: str) -> None:
             duration_seconds=round((finished_at - started_at).total_seconds(), 1),
             message="Đồng bộ vượt quá 5 phút và đã bị dừng.",
             error=str(exc),
+            warning=None,
         )
     except Exception as exc:
         finished_at = datetime.now(timezone.utc)
@@ -908,6 +981,8 @@ def _run_manual_sync(requested_by: str | None, job_id: str) -> None:
             duration_seconds=round((finished_at - started_at).total_seconds(), 1),
             message="Không đồng bộ được dữ liệu.",
             error=str(exc),
+            warning=None,
+            output_tail=output_tail,
         )
 
 
@@ -1117,6 +1192,7 @@ def start_admin_data_sync(background_tasks: BackgroundTasks, request: Request):
             "requested_by": admin.get("email"),
             "message": "Yêu cầu đồng bộ đã được đưa vào hàng đợi.",
             "error": None,
+            "warning": None,
             "output_tail": None,
             "duration_seconds": None,
         })

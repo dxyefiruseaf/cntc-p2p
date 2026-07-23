@@ -51,6 +51,14 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_csv(name: str) -> list[str]:
+    return [
+        item.strip().rstrip("/")
+        for item in os.getenv(name, "").split(",")
+        if item.strip()
+    ]
+
+
 def get_supabase_client():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -115,11 +123,63 @@ def fetch_from_public_api(hours: int) -> tuple[list[dict[str, Any]], list[dict[s
 # ---------------------------------------------------------------------------
 
 
+def binance_market_data_bases() -> list[str]:
+    """Return public market-data endpoints in safe priority order.
+
+    Render shared outbound IPs can receive HTTP 451 from api.binance.com.
+    Binance documents data-api.binance.vision specifically for public market
+    data, so it is always tried first even when a legacy environment variable
+    still points to api.binance.com.
+    """
+
+    candidates = [
+        "https://data-api.binance.vision",
+        *env_csv("BINANCE_API_BASES"),
+    ]
+    legacy_base = os.getenv("BINANCE_API_BASE", "").strip().rstrip("/")
+    if legacy_base:
+        candidates.append(legacy_base)
+
+    unique: list[str] = []
+    for base in candidates:
+        normalized = base.strip().rstrip("/")
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+    return unique
+
+
 def fetch_binance_klines(hours: int) -> list[list[Any]]:
-    limit = min(max(hours, 1), 1000)  # Binance spot klines limit tối đa thường là 1000.
-    base = os.getenv("BINANCE_API_BASE", "https://data-api.binance.vision").rstrip("/")
-    url = f"{base}/api/v3/klines?symbol=BTCUSDT&interval=1h&limit={limit}"
-    return fetch_json(url)
+    limit = min(max(hours, 1), 1000)
+    errors: list[str] = []
+
+    for base in binance_market_data_bases():
+        url = f"{base}/api/v3/klines?symbol=BTCUSDT&interval=1h&limit={limit}"
+        try:
+            payload = fetch_json(url, timeout=30)
+            if not isinstance(payload, list) or not payload:
+                raise RuntimeError("Binance trả về dữ liệu klines rỗng hoặc sai định dạng")
+            print(f"OHLCV endpoint: {base}")
+            return payload
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            reason = f"HTTP {status} từ {base}"
+            errors.append(reason)
+            if status == 451:
+                print(
+                    f"{reason}: endpoint bị hạn chế theo vị trí/IP; đang thử endpoint market-data khác...",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"{reason}; đang thử endpoint market-data khác...", file=sys.stderr)
+        except Exception as exc:
+            reason = f"{base}: {type(exc).__name__}: {exc}"
+            errors.append(reason)
+            print(f"Không lấy được OHLCV từ {reason}", file=sys.stderr)
+
+    raise RuntimeError(
+        "Không lấy được OHLCV Binance từ các endpoint market-data. "
+        + " | ".join(errors[-4:])
+    )
 
 
 def klines_to_ohlcv_rows(klines: list[list[Any]]) -> list[dict[str, Any]]:
@@ -684,7 +744,18 @@ def main():
     print(f"Sync hours : {hours}")
 
     if source == "binance":
-        ohlcv_rows, p2p_rows = fetch_from_binance(hours)
+        try:
+            ohlcv_rows, p2p_rows = fetch_from_binance(hours)
+        except Exception as exc:
+            if not env_bool("SYNC_PUBLIC_API_FALLBACK", True):
+                raise
+            print(
+                "Binance OHLCV không khả dụng; chuyển sang PUBLIC_DATA_API_URL. "
+                f"Nguyên nhân: {exc}",
+                file=sys.stderr,
+            )
+            ohlcv_rows, p2p_rows = fetch_from_public_api(hours)
+
         # Nếu P2P Binance lỗi, thử lấy P2P từ public API để demo vẫn có số liệu.
         if not p2p_rows and env_bool("SYNC_P2P_PUBLIC_FALLBACK", True):
             try:
@@ -707,7 +778,17 @@ def main():
     print(f"Upserted OHLCV rows: {ohlcv_count}")
     print(f"Upserted P2P rows  : {p2p_count}")
     print(f"Latest OHLCV timestamp: {latest_ts}")
-    check_alert_rules(ohlcv_rows, p2p_rows)
+
+    # This marker means the primary objective is complete: market data has
+    # already been committed to Supabase. Alert delivery is an auxiliary task
+    # and must not make the Admin Console report the data sync as failed.
+    print("CORE_SYNC_SUCCESS=1")
+    try:
+        check_alert_rules(ohlcv_rows, p2p_rows)
+    except Exception as exc:
+        warning = f"Không hoàn tất tác vụ cảnh báo sau đồng bộ: {type(exc).__name__}: {exc}"
+        print(f"POST_SYNC_WARNING={warning}", file=sys.stderr)
+        print(warning, file=sys.stderr)
     print("Done.")
 
 
