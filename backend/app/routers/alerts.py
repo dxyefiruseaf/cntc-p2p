@@ -30,14 +30,14 @@ class AlertUpdate(BaseModel):
 
 
 @router.get("")
-async def get_alerts(request: Request):
+def get_alerts(request: Request):
     user = get_current_user(request)
     rows = list_alert_rules(user["id"])
     return {"count": len(rows), "data": rows}
 
 
 @router.post("")
-async def post_alert(payload: AlertCreate, request: Request):
+def post_alert(payload: AlertCreate, request: Request):
     user = get_current_user(request)
     if payload.active and count_active_alerts(user["id"]) >= 5:
         raise HTTPException(status_code=400, detail="Mỗi tài khoản chỉ được bật tối đa 5 cảnh báo")
@@ -50,7 +50,7 @@ async def post_alert(payload: AlertCreate, request: Request):
 
 
 @router.patch("/{rule_id}")
-async def patch_alert(rule_id: str, payload: AlertUpdate, request: Request):
+def patch_alert(rule_id: str, payload: AlertUpdate, request: Request):
     user = get_current_user(request)
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
     if not updates:
@@ -62,7 +62,7 @@ async def patch_alert(rule_id: str, payload: AlertUpdate, request: Request):
 
 
 @router.delete("/{rule_id}")
-async def remove_alert(rule_id: str, request: Request):
+def remove_alert(rule_id: str, request: Request):
     user = get_current_user(request)
     ok = delete_alert_rule(rule_id, user["id"])
     if not ok:

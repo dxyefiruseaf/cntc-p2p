@@ -1,10 +1,31 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from typing import Any
 
 from fastapi import HTTPException, Request, status
 
+from app.cache import TTLCache
 from app.supabase_client import get_supabase
+
+_AUTH_CACHE = TTLCache(max_entries=10_000)
+_PROFILE_CACHE = TTLCache(max_entries=10_000)
+AUTH_CACHE_SECONDS = 20
+PROFILE_CACHE_SECONDS = 10
+
+
+def _token_cache_key(token: str) -> str:
+    return f"auth:token:{sha256(token.encode('utf-8')).hexdigest()}"
+
+
+def invalidate_user_auth_cache(user_id: str | None = None) -> None:
+    # Token keys cannot be mapped back to a user without maintaining another
+    # unbounded index, so status/role changes clear the small bounded cache.
+    _AUTH_CACHE.clear()
+    if user_id:
+        _PROFILE_CACHE.delete(f"auth:profile:{user_id}")
+    else:
+        _PROFILE_CACHE.clear()
 
 
 def _extract_bearer_token(request: Request) -> str | None:
@@ -50,6 +71,11 @@ def get_current_user(request: Request) -> dict[str, Any]:
     if sb is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Supabase chưa được cấu hình")
 
+    cache_key = _token_cache_key(token)
+    cached = _AUTH_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+
     try:
         user_res = sb.auth.get_user(token)
         user = _normalize_user(user_res)
@@ -58,7 +84,7 @@ def get_current_user(request: Request) -> dict[str, Any]:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tài khoản đã bị tạm khóa")
         if profile:
             user["profile"] = profile
-        return user
+        return _AUTH_CACHE.set(cache_key, user, AUTH_CACHE_SECONDS)
     except HTTPException:
         raise
     except Exception:
@@ -82,6 +108,11 @@ def get_user_profile(user_id: str, *, raise_on_error: bool = False) -> dict[str,
     application role/status. A missing table/profile is treated as a normal user
     so older deployments keep working until the SQL migration is applied.
     """
+    cache_key = f"auth:profile:{user_id}"
+    cached = _PROFILE_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached) if cached else None
+
     sb = get_supabase()
     if sb is None:
         return None
@@ -93,7 +124,9 @@ def get_user_profile(user_id: str, *, raise_on_error: bool = False) -> dict[str,
             .limit(1)
             .execute()
         )
-        return res.data[0] if res.data else None
+        profile = res.data[0] if res.data else None
+        _PROFILE_CACHE.set(cache_key, profile or {}, PROFILE_CACHE_SECONDS)
+        return profile
     except Exception as exc:
         if raise_on_error:
             raise HTTPException(

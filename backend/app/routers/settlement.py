@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.repositories.market_repository import get_p2p_spread
-from app.services.tax_service import calc_tax
+from app.services.tax_service import calc_tax, zero_tax_metadata
 
 router = APIRouter(prefix="/api", tags=["settlement"])
 
@@ -45,7 +45,7 @@ def _gross_from_amount(amount: float, unit: str, price: float) -> tuple[float, f
 
 
 @router.get("/net-settlement")
-async def net_settlement(
+def net_settlement(
     amount: float = Query(..., gt=0),
     unit: str = Query("vnd", pattern="^(vnd|usdt)$"),
     side: str = Query("sell", pattern="^(sell|buy)$"),
@@ -80,11 +80,7 @@ async def net_settlement(
         taxable_vnd = gross_vnd
         alt_taxable_vnd = alt_gross_vnd
 
-    tax = calc_tax(max(taxable_vnd, 0.000001), country, holding_days) if taxable_vnd > 0 else {
-        "country": country.upper(), "tax_rate_pct": 0, "tax_amount": 0, "net_amount": gross_vnd,
-        "note": "Chiều mua không phát sinh thuế bán trong mô phỏng này.",
-        "disclaimer": "Chỉ mang tính ước tính tham khảo, không thay thế tư vấn thuế chuyên nghiệp.",
-    }
+    tax = calc_tax(max(taxable_vnd, 0.000001), country, holding_days) if taxable_vnd > 0 else zero_tax_metadata(country, gross_vnd)
     alt_tax = calc_tax(max(alt_taxable_vnd, 0.000001), country, holding_days) if alt_taxable_vnd > 0 else {"tax_amount": 0}
 
     net_vnd = gross_vnd - float(tax.get("tax_amount", 0))
@@ -108,6 +104,9 @@ async def net_settlement(
             "country": tax.get("country"),
             "tax_rate_pct": tax.get("tax_rate_pct", 0),
             "tax_amount": tax.get("tax_amount", 0),
+            "formula": tax.get("formula"),
+            "legal_basis": tax.get("legal_basis", []),
+            "methodology_note": tax.get("methodology_note"),
             "note": tax.get("note"),
             "disclaimer": tax.get("disclaimer"),
         },

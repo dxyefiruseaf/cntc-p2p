@@ -4,14 +4,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
+import json
+import logging
 import os
 import subprocess
 import sys
+import uuid
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
-from app.auth import require_admin
+from app.auth import invalidate_user_auth_cache, require_admin
 from app.cache import TTLCache
 from app.config import get_settings
 from app.data_loader import load_mock_data
@@ -26,9 +29,11 @@ from app.schemas import SeedRequest
 from app.supabase_client import get_supabase
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+logger = logging.getLogger(__name__)
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 SYNC_SCRIPT = BACKEND_ROOT / "scripts" / "sync_market_data.py"
+SYNC_STATE_FILE = BACKEND_ROOT / ".runtime" / "admin_data_sync_state.json"
 DATA_FRESH_THRESHOLD_HOURS = 2.0
 
 # Cache TTLs are intentionally short: Admin gets fast repeat loads while data
@@ -49,6 +54,8 @@ _DATA_SYNC_STATE: dict[str, Any] = {
     "message": "Chưa có yêu cầu đồng bộ thủ công.",
     "error": None,
     "output_tail": None,
+    "job_id": None,
+    "duration_seconds": None,
 }
 
 
@@ -77,7 +84,7 @@ def _cached(key: str, ttl_seconds: int, factory: Callable[[], Any], refresh: boo
 
 def _rows(
     table: str,
-    fields: str = "*",
+    fields: str,
     *,
     limit: int = 100,
     offset: int = 0,
@@ -197,14 +204,30 @@ def _freshness_item(timestamp: Any, now: datetime) -> dict[str, Any]:
 
 def _build_data_freshness() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    latest = get_latest_ohlcv() or {}
-    p2p_rows = get_p2p_spread(1)
+    read_errors: list[str] = []
+
+    try:
+        latest = get_latest_ohlcv() or {}
+    except Exception as exc:
+        logger.exception("Could not read latest OHLCV for Admin freshness")
+        latest = {}
+        read_errors.append(f"ohlcv:{type(exc).__name__}")
+
+    try:
+        p2p_rows = get_p2p_spread(1)
+    except Exception as exc:
+        logger.exception("Could not read P2P freshness for Admin overview")
+        p2p_rows = []
+        read_errors.append(f"p2p:{type(exc).__name__}")
+
     ohlcv = _freshness_item(latest.get("timestamp"), now)
     p2p = _freshness_item((p2p_rows[0] if p2p_rows else {}).get("timestamp"), now)
     rank = {"fresh": 0, "late": 1, "stale": 2, "missing": 3}
     state = max((ohlcv["state"], p2p["state"]), key=lambda value: rank.get(value, 3))
     needs_sync = state != "fresh"
-    if state == "fresh":
+    if read_errors:
+        message = "Tạm thời không đọc được đầy đủ dữ liệu Supabase; Dashboard đang dùng dữ liệu cache hoặc trạng thái dự phòng."
+    elif state == "fresh":
         message = "Dữ liệu thị trường đang đúng lịch đồng bộ."
     elif state == "late":
         message = "Dữ liệu đã trễ lịch. Nên đồng bộ ngay để tránh hiển thị số liệu cũ."
@@ -218,6 +241,8 @@ def _build_data_freshness() -> dict[str, Any]:
         "threshold_hours": DATA_FRESH_THRESHOLD_HOURS,
         "checked_at": now.isoformat(),
         "message": message,
+        "degraded": bool(read_errors),
+        "read_errors": read_errors,
         "ohlcv": ohlcv,
         "p2p": p2p,
     }
@@ -227,14 +252,57 @@ def _data_freshness(force: bool = False) -> dict[str, Any]:
     return _cached("admin:freshness", FRESHNESS_CACHE_SECONDS, _build_data_freshness, refresh=force)
 
 
+def _load_sync_state_unlocked() -> None:
+    try:
+        if not SYNC_STATE_FILE.exists():
+            return
+        payload = json.loads(SYNC_STATE_FILE.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            _DATA_SYNC_STATE.update(payload)
+    except Exception as exc:
+        logger.warning("Could not read persisted data sync state: %s", exc)
+
+
+def _write_sync_state_unlocked() -> None:
+    try:
+        SYNC_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = SYNC_STATE_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(_DATA_SYNC_STATE, ensure_ascii=False, default=str), encoding="utf-8")
+        temporary.replace(SYNC_STATE_FILE)
+    except Exception as exc:
+        logger.warning("Could not persist data sync state: %s", exc)
+
+
 def _sync_state_snapshot() -> dict[str, Any]:
     with _DATA_SYNC_STATE_LOCK:
+        _load_sync_state_unlocked()
+        status = str(_DATA_SYNC_STATE.get("status") or "idle").lower()
+        started_at = _DATA_SYNC_STATE.get("started_at")
+        if status in {"queued", "running"} and started_at:
+            try:
+                started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - started.astimezone(timezone.utc)).total_seconds()
+                if elapsed > 360:
+                    _DATA_SYNC_STATE.update({
+                        "status": "failed",
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "duration_seconds": round(elapsed, 1),
+                        "message": "Tiến trình đồng bộ không phản hồi và đã được tự động kết thúc.",
+                        "error": "Quá thời gian theo dõi tiến trình đồng bộ.",
+                    })
+                    _write_sync_state_unlocked()
+            except (TypeError, ValueError):
+                pass
         return dict(_DATA_SYNC_STATE)
 
 
 def _set_sync_state(**updates: Any) -> None:
     with _DATA_SYNC_STATE_LOCK:
+        _load_sync_state_unlocked()
         _DATA_SYNC_STATE.update(updates)
+        _write_sync_state_unlocked()
 
 
 def _dashboard_summary() -> dict[str, Any]:
@@ -243,6 +311,16 @@ def _dashboard_summary() -> dict[str, Any]:
     rpc_summary = _rpc_json("admin_dashboard_summary")
     if rpc_summary:
         return rpc_summary
+
+    # The migration exposes the same single-row materialized view even when
+    # PostgREST has not reloaded the RPC schema cache yet.
+    mv_rows = _rows(
+        "mv_admin_dashboard_summary",
+        "total_users,active_users,online_24h,premium_users,successful_orders,revenue_vnd,trade_count,trade_volume_vnd,ai_questions,active_alerts,wallet_balance_vnd,refreshed_at",
+        limit=1,
+    )
+    if mv_rows:
+        return mv_rows[0]
 
     now = datetime.now(timezone.utc)
     online_cutoff = (now - timedelta(hours=24)).isoformat()
@@ -388,6 +466,32 @@ def _activity_total(kind: str) -> int:
 
 
 def _activity_page(page: int, limit: int, kind: str) -> dict[str, Any]:
+    # The common first page is served by one UNION ALL RPC and one profile JOIN.
+    # Older databases keep the bounded Python merge fallback below.
+    if page == 1:
+        rpc_data = _rpc_json(
+            "admin_activity_cursor",
+            {
+                "p_limit": limit,
+                "p_type": kind,
+                "p_cursor_at": None,
+                "p_cursor_id": None,
+            },
+        )
+        if rpc_data:
+            rows = rpc_data.get("data") if isinstance(rpc_data.get("data"), list) else []
+            total = _activity_total(kind)
+            return {
+                "count": len(rows),
+                "total": total,
+                "page": 1,
+                "page_size": limit,
+                "has_next": bool(rpc_data.get("has_next")),
+                "next_cursor": rpc_data.get("next_cursor"),
+                "type": kind,
+                "data": rows,
+            }
+
     # To keep a globally sorted mixed feed, read only the newest window required
     # for the requested page from each source, merge it, then slice one page.
     window = min(500, max(limit, page * limit + limit))
@@ -407,6 +511,105 @@ def _activity_page(page: int, limit: int, kind: str) -> dict[str, Any]:
     }
 
 
+def _activity_page_filtered(
+    page: int,
+    limit: int,
+    kind: str,
+    *,
+    search: str = "",
+    status: str = "all",
+    date_from: str | None = None,
+    date_to: str | None = None,
+    sort: str = "desc",
+) -> dict[str, Any]:
+    """Return one filtered admin activity page without changing activity semantics.
+
+    The optimized UNION RPC remains the fast path for the default feed. Filters
+    use a bounded merge of the newest rows from each source, which prevents
+    unbounded reads while still supporting search/date/status controls in the
+    admin interface.
+    """
+    normalized_search = str(search or "").strip().lower()
+    normalized_status = str(status or "all").strip().lower()
+    normalized_sort = "asc" if str(sort or "desc").lower() == "asc" else "desc"
+
+    if (
+        not normalized_search
+        and normalized_status == "all"
+        and not date_from
+        and not date_to
+        and normalized_sort == "desc"
+    ):
+        return _activity_page(page, limit, kind)
+
+    def parse_boundary(value: str | None, *, end: bool = False) -> datetime | None:
+        if not value:
+            return None
+        raw = str(value).strip()
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = datetime.strptime(raw, "%Y-%m-%d")
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if end and len(raw) <= 10:
+            parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return parsed.astimezone(timezone.utc)
+
+    start_at = parse_boundary(date_from)
+    end_at = parse_boundary(date_to, end=True)
+    # Bounded by source to avoid loading the complete transaction history.
+    source_window = min(500, max(100, page * limit * 4))
+    profiles, orders, trades, ai_rows = _recent_activity_rows(source_window, kind)
+    rows = _recent_activity(profiles, orders, trades, ai_rows, max_items=None)
+
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        created_at = _parse_time(row.get("created_at"))
+        if start_at and (created_at is None or created_at < start_at):
+            continue
+        if end_at and (created_at is None or created_at > end_at):
+            continue
+        row_status = str(row.get("status") or "").lower()
+        if normalized_status != "all" and row_status != normalized_status:
+            continue
+        if normalized_search:
+            haystack = " ".join(
+                str(row.get(key) or "")
+                for key in ("title", "detail", "status", "type", "id")
+            ).lower()
+            if normalized_search not in haystack:
+                continue
+        filtered.append(row)
+
+    filtered.sort(
+        key=lambda item: _parse_time(item.get("created_at"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=normalized_sort == "desc",
+    )
+    total = len(filtered)
+    offset = (page - 1) * limit
+    page_rows = filtered[offset: offset + limit]
+    return {
+        "count": len(page_rows),
+        "total": total,
+        "page": page,
+        "page_size": limit,
+        "has_next": offset + limit < total,
+        "type": kind,
+        "search": normalized_search,
+        "status": normalized_status,
+        "date_from": date_from,
+        "date_to": date_to,
+        "sort": normalized_sort,
+        "data": page_rows,
+        "bounded": True,
+    }
+
+
 def _system_payload(*, data_points: int = 0, force_freshness: bool = False) -> dict[str, Any]:
     settings = get_settings()
     return {
@@ -422,13 +625,30 @@ def _system_payload(*, data_points: int = 0, force_freshness: bool = False) -> d
 
 
 def _overview_data() -> dict[str, Any]:
-    profiles, orders, trades, ai_rows = _recent_activity_rows()
-    market_series = get_ohlcv(72)
+    # Initial admin paint stays lightweight: only summary, current BTC and
+    # notifications/system status. Chart series and activity are lazy endpoints.
+    latest = get_latest_ohlcv() or {}
     return {
         "summary": _dashboard_summary(),
-        "market": {"latest": get_latest_ohlcv() or {}, "series": market_series},
-        "activity": _recent_activity(profiles, orders, trades, ai_rows),
-        "system": _system_payload(data_points=len(market_series)),
+        "market": {"latest": latest, "series": []},
+        "activity": [],
+        "system": _system_payload(data_points=0),
+        "deferred": {"market_series": True, "activity": True},
+    }
+
+
+def _admin_market_series(hours: int) -> dict[str, Any]:
+    rows = get_ohlcv(hours)
+    return {"count": len(rows), "hours": hours, "data": rows}
+
+
+def _admin_activity_feed(limit: int) -> dict[str, Any]:
+    page = _activity_page(1, limit, "all")
+    return {
+        "count": page.get("count", 0),
+        "has_next": page.get("has_next", False),
+        "next_cursor": page.get("next_cursor"),
+        "data": page.get("data", []),
     }
 
 
@@ -578,6 +798,39 @@ def _users_page(page: int, limit: int, search: str, status: str, plan: str) -> d
     return _users_page_fallback(page, limit, search, status, plan)
 
 
+def _users_cursor_page(
+    limit: int,
+    search: str,
+    status: str,
+    plan: str,
+    cursor_created_at: str | None,
+    cursor_user_id: str | None,
+) -> dict[str, Any] | None:
+    rpc_data = _rpc_json(
+        "admin_users_cursor",
+        {
+            "p_limit": limit,
+            "p_search": search.strip(),
+            "p_status": status,
+            "p_plan": plan,
+            "p_cursor_created_at": cursor_created_at,
+            "p_cursor_user_id": cursor_user_id,
+        },
+    )
+    if not rpc_data:
+        return None
+    rows = rpc_data.get("data") if isinstance(rpc_data.get("data"), list) else []
+    return {
+        "count": len(rows),
+        "total": 0,
+        "page": 1,
+        "page_size": limit,
+        "has_next": bool(rpc_data.get("has_next")),
+        "next_cursor": rpc_data.get("next_cursor"),
+        "data": rows,
+    }
+
+
 def _users_data(page: int, limit: int, search: str, status: str, plan: str) -> dict[str, Any]:
     return {
         "summary": {},
@@ -588,16 +841,18 @@ def _users_data(page: int, limit: int, search: str, status: str, plan: str) -> d
     }
 
 
-def _run_manual_sync(requested_by: str | None) -> None:
+def _run_manual_sync(requested_by: str | None, job_id: str) -> None:
     started_at = datetime.now(timezone.utc)
     _set_sync_state(
         status="running",
+        job_id=job_id,
         started_at=started_at.isoformat(),
         finished_at=None,
         requested_by=requested_by,
         message="Đang lấy dữ liệu mới và cập nhật Supabase...",
         error=None,
         output_tail=None,
+        duration_seconds=None,
     )
 
     try:
@@ -620,9 +875,12 @@ def _run_manual_sync(requested_by: str | None) -> None:
             raise RuntimeError(output_tail or f"Script kết thúc với mã lỗi {result.returncode}")
         _invalidate_admin_cache()
         freshness = _data_freshness(force=True)
+        finished_at = datetime.now(timezone.utc)
         _set_sync_state(
             status="success",
-            finished_at=datetime.now(timezone.utc).isoformat(),
+            job_id=job_id,
+            finished_at=finished_at.isoformat(),
+            duration_seconds=round((finished_at - started_at).total_seconds(), 1),
             message=(
                 "Đồng bộ hoàn tất và dữ liệu đã trở lại trạng thái mới."
                 if freshness.get("state") == "fresh"
@@ -632,19 +890,57 @@ def _run_manual_sync(requested_by: str | None) -> None:
             output_tail=output_tail,
         )
     except subprocess.TimeoutExpired as exc:
+        finished_at = datetime.now(timezone.utc)
         _set_sync_state(
             status="failed",
-            finished_at=datetime.now(timezone.utc).isoformat(),
+            job_id=job_id,
+            finished_at=finished_at.isoformat(),
+            duration_seconds=round((finished_at - started_at).total_seconds(), 1),
             message="Đồng bộ vượt quá 5 phút và đã bị dừng.",
             error=str(exc),
         )
     except Exception as exc:
+        finished_at = datetime.now(timezone.utc)
         _set_sync_state(
             status="failed",
-            finished_at=datetime.now(timezone.utc).isoformat(),
+            job_id=job_id,
+            finished_at=finished_at.isoformat(),
+            duration_seconds=round((finished_at - started_at).total_seconds(), 1),
             message="Không đồng bộ được dữ liệu.",
             error=str(exc),
         )
+
+
+def _degraded_overview(error: Exception) -> dict[str, Any]:
+    """Keep the Admin shell available during a temporary Supabase outage."""
+    now = datetime.now(timezone.utc).isoformat()
+    logger.exception("Admin overview degraded because a dependency failed", exc_info=error)
+    return {
+        "summary": {},
+        "market": {"latest": {}, "series": []},
+        "activity": [],
+        "system": {
+            "api": "operational",
+            "database": "degraded",
+            "ai_provider": get_settings().ai_provider,
+            "environment": get_settings().app_env,
+            "data_points": 0,
+            "checked_at": now,
+            "data_freshness": {
+                "state": "missing",
+                "needs_sync": True,
+                "threshold_hours": DATA_FRESH_THRESHOLD_HOURS,
+                "checked_at": now,
+                "message": "Supabase tạm thời không phản hồi. Hãy thử làm mới sau vài giây.",
+                "degraded": True,
+                "ohlcv": _freshness_item(None, datetime.now(timezone.utc)),
+                "p2p": _freshness_item(None, datetime.now(timezone.utc)),
+            },
+            "data_sync": _sync_state_snapshot(),
+        },
+        "deferred": {"market_series": True, "activity": True},
+        "degraded": True,
+    }
 
 
 @router.get("/me")
@@ -666,7 +962,15 @@ def admin_overview(
 ):
     admin = require_admin(request)
     _private_cache_headers(response, OVERVIEW_CACHE_SECONDS)
-    payload = dict(_cached("admin:overview", OVERVIEW_CACHE_SECONDS, _overview_data, refresh=refresh))
+    try:
+        payload = dict(_cached("admin:overview", OVERVIEW_CACHE_SECONDS, _overview_data, refresh=refresh))
+    except Exception as exc:
+        # A transient Supabase/PostgREST socket error must not turn the complete
+        # Admin application into a 500 response. Do not cache this degraded
+        # response so the next refresh can recover immediately.
+        _ADMIN_CACHE.delete("admin:overview")
+        response.headers["Cache-Control"] = "no-store"
+        payload = _degraded_overview(exc)
     payload["admin"] = {"email": admin.get("email"), "role": "admin"}
     return payload
 
@@ -681,6 +985,40 @@ def admin_dashboard(
     return admin_overview(request, response, refresh)
 
 
+@router.get("/market-series")
+def admin_market_series(
+    request: Request,
+    response: Response,
+    hours: int = Query(72, ge=24, le=720),
+    refresh: bool = Query(False),
+):
+    require_admin(request)
+    _private_cache_headers(response, OVERVIEW_CACHE_SECONDS)
+    return _cached(
+        f"admin:market-series:{hours}",
+        OVERVIEW_CACHE_SECONDS,
+        lambda: _admin_market_series(hours),
+        refresh=refresh,
+    )
+
+
+@router.get("/activity-feed")
+def admin_activity_feed(
+    request: Request,
+    response: Response,
+    limit: int = Query(7, ge=1, le=20),
+    refresh: bool = Query(False),
+):
+    require_admin(request)
+    _private_cache_headers(response, ACTIVITY_CACHE_SECONDS)
+    return _cached(
+        f"admin:activity-feed:{limit}",
+        ACTIVITY_CACHE_SECONDS,
+        lambda: _admin_activity_feed(limit),
+        refresh=refresh,
+    )
+
+
 @router.get("/activity")
 def admin_activity(
     request: Request,
@@ -688,16 +1026,48 @@ def admin_activity(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=10, le=100),
     type: str = Query("all", pattern="^(all|trade|premium|ai)$"),
+    status: str = Query(
+        "all",
+        pattern="^(all|success|pending|failed|completed|buy|sell|neutral)$",
+    ),
+    search: str = Query("", max_length=120),
+    date_from: str | None = Query(None, max_length=32),
+    date_to: str | None = Query(None, max_length=32),
+    sort: str = Query("desc", pattern="^(asc|desc)$"),
     refresh: bool = Query(False),
 ):
     admin = require_admin(request)
-    cache_key = f"admin:activity:{page}:{limit}:{type}"
+    normalized_search = search.strip().lower()
+    cache_key = (
+        f"admin:activity:{page}:{limit}:{type}:{status}:{sort}:"
+        f"{date_from or ''}:{date_to or ''}:{normalized_search}"
+    )
     _private_cache_headers(response, ACTIVITY_CACHE_SECONDS)
+
+    def build_activity_payload() -> dict[str, Any]:
+        activity_page = _activity_page_filtered(
+            page,
+            limit,
+            type,
+            search=normalized_search,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+            sort=sort,
+        )
+        return {
+            "summary": _dashboard_summary(),
+            "market": {"latest": get_latest_ohlcv() or {}, "series": []},
+            "activity": activity_page["data"],
+            "activity_page": activity_page,
+            "system": _system_payload(data_points=72),
+        }
+
     payload = dict(
         _cached(
             cache_key,
             ACTIVITY_CACHE_SECONDS,
-            lambda: _activity_data(page, limit, type),
+            build_activity_payload,
             refresh=refresh,
         )
     )
@@ -734,20 +1104,25 @@ def admin_data_sync_status(request: Request, response: Response):
 @router.post("/data-sync", status_code=202)
 def start_admin_data_sync(background_tasks: BackgroundTasks, request: Request):
     admin = require_admin(request)
+    job_id = uuid.uuid4().hex
     with _DATA_SYNC_STATE_LOCK:
+        _load_sync_state_unlocked()
         if _DATA_SYNC_STATE.get("status") in {"queued", "running"}:
             raise HTTPException(status_code=409, detail="Một tiến trình đồng bộ dữ liệu đang chạy")
         _DATA_SYNC_STATE.update({
             "status": "queued",
+            "job_id": job_id,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "finished_at": None,
             "requested_by": admin.get("email"),
             "message": "Yêu cầu đồng bộ đã được đưa vào hàng đợi.",
             "error": None,
             "output_tail": None,
+            "duration_seconds": None,
         })
+        _write_sync_state_unlocked()
     _invalidate_admin_cache("admin:system", "admin:freshness")
-    background_tasks.add_task(_run_manual_sync, admin.get("email"))
+    background_tasks.add_task(_run_manual_sync, admin.get("email"), job_id)
     return {
         "accepted": True,
         "data": _data_freshness(force=True),
@@ -764,17 +1139,44 @@ def admin_users(
     search: str = Query("", max_length=120),
     status: str = Query("all", pattern="^(all|active|suspended)$"),
     plan: str = Query("all", pattern="^(all|premium|free)$"),
+    cursor_mode: bool = Query(False),
+    cursor_created_at: str | None = Query(None),
+    cursor_user_id: str | None = Query(None),
     refresh: bool = Query(False),
 ):
     admin = require_admin(request)
     normalized_search = search.strip().lower()
-    key = f"admin:users:{page}:{limit}:{status}:{plan}:{normalized_search}"
+    cursor_key = f"{cursor_created_at or ''}:{cursor_user_id or ''}"
+    key = f"admin:users:{page}:{limit}:{status}:{plan}:{normalized_search}:{cursor_mode}:{cursor_key}"
     _private_cache_headers(response, USERS_CACHE_SECONDS)
+
+    def build_payload() -> dict[str, Any]:
+        if cursor_mode:
+            cursor_page = _users_cursor_page(
+                limit,
+                normalized_search,
+                status,
+                plan,
+                cursor_created_at,
+                cursor_user_id,
+            )
+            if cursor_page:
+                cursor_page["page"] = page
+                cursor_page["cursor_mode"] = True
+                return {
+                    "summary": {},
+                    "market": {"latest": get_latest_ohlcv() or {}, "series": []},
+                    "activity": [],
+                    "system": _system_payload(data_points=72),
+                    "users": cursor_page,
+                }
+        return _users_data(page, limit, normalized_search, status, plan)
+
     payload = dict(
         _cached(
             key,
             USERS_CACHE_SECONDS,
-            lambda: _users_data(page, limit, normalized_search, status, plan),
+            build_payload,
             refresh=refresh,
         )
     )
@@ -825,6 +1227,7 @@ def update_admin_user_status(user_id: str, payload: AdminUserStatusUpdate, reque
         except Exception:
             pass
         raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+    invalidate_user_auth_cache(user_id)
     _invalidate_admin_cache("admin:users", "admin:overview", "admin:activity", "admin:system")
     return res.data[0]
 

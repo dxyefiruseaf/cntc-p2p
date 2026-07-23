@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_version: str = "1.0.0"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origin_regex: str = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
@@ -48,7 +49,24 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> List[str]:
-        return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+        """Return a stable, de-duplicated CORS allow-list.
+
+        Local Vite origins are always included so a production-oriented .env
+        cannot accidentally break local development of the separate data API.
+        FRONTEND_URL is also included automatically when configured.
+        """
+        origins = {
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        }
+        origins.update(
+            item.strip().rstrip("/")
+            for item in self.cors_origins.split(",")
+            if item.strip() and item.strip() != "*"
+        )
+        if self.frontend_url:
+            origins.add(self.frontend_url.strip().rstrip("/"))
+        return sorted(origins)
 
 
 @lru_cache

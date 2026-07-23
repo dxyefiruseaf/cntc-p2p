@@ -511,31 +511,126 @@ def _send_resend_email(to_email: str, subject: str, html_body: str) -> bool:
         return False
 
 
-def check_alert_rules(latest_rows: list[dict[str, Any]], p2p_rows: list[dict[str, Any]]) -> None:
-    sb = get_supabase_client()
-    latest = latest_rows[-1] if latest_rows else None
-    cooldown_hours = env_int("ALERT_COOLDOWN_HOURS", 6)
+def _batch_profile_emails(sb, user_ids: list[str]) -> dict[str, str]:
+    """Resolve alert recipient emails in one query instead of one auth call per rule."""
+    unique_ids = sorted({value for value in user_ids if value})
+    if not unique_ids:
+        return {}
+    try:
+        rows = (
+            sb.table("user_profiles")
+            .select("user_id,email")
+            .in_("user_id", unique_ids)
+            .execute()
+            .data
+            or []
+        )
+        return {
+            str(row.get("user_id")): str(row.get("email"))
+            for row in rows
+            if row.get("user_id") and row.get("email")
+        }
+    except Exception as exc:
+        print(f"Không đọc được email theo batch từ user_profiles: {exc}")
+        return {}
+
+
+def _claim_triggered_rules_rpc(
+    sb,
+    latest: dict[str, Any] | None,
+    p2p_rows: list[dict[str, Any]],
+    cooldown_hours: int,
+) -> list[dict[str, Any]] | None:
+    """Atomically find and claim triggered rules.
+
+    Returning ``None`` means the performance migration/RPC is not installed yet,
+    so the caller should use the backwards-compatible explicit-column fallback.
+    """
+    sell = next((row for row in p2p_rows if row.get("trade_type") == "SELL"), None)
+    buy = next((row for row in p2p_rows if row.get("trade_type") == "BUY"), None)
+    params = {
+        "p_price": clean_number(latest.get("close")) if latest else None,
+        "p_rsi": clean_number(latest.get("rsi_14")) if latest else None,
+        "p_p2p_sell": clean_number(sell.get("spread_pct")) if sell else None,
+        "p_p2p_buy": clean_number(buy.get("spread_pct")) if buy else None,
+        "p_cooldown_hours": cooldown_hours,
+        "p_limit": env_int("ALERT_BATCH_LIMIT", 1000),
+    }
+    try:
+        return sb.rpc("claim_triggered_alerts", params).execute().data or []
+    except Exception as exc:
+        print(f"claim_triggered_alerts RPC chưa sẵn sàng, dùng fallback: {exc}")
+        return None
+
+
+def _fallback_triggered_rules(
+    sb,
+    latest: dict[str, Any] | None,
+    p2p_rows: list[dict[str, Any]],
+    cooldown_hours: int,
+) -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
     try:
-        rules = sb.table("alert_rules").select("*").eq("active", True).execute().data or []
+        rules = (
+            sb.table("alert_rules")
+            .select("id,user_id,metric,operator,threshold,last_triggered_at")
+            .eq("active", True)
+            .limit(env_int("ALERT_BATCH_LIMIT", 1000))
+            .execute()
+            .data
+            or []
+        )
     except Exception as exc:
-        print(f"Không đọc được alert_rules (bạn đã chạy supabase/schema.sql mới chưa?): {exc}")
-        return
+        print(f"Không đọc được alert_rules: {exc}")
+        return []
 
-    sent_count = 0
+    email_by_user = _batch_profile_emails(
+        sb,
+        [str(rule.get("user_id")) for rule in rules if rule.get("user_id")],
+    )
+    triggered: list[dict[str, Any]] = []
     for rule in rules:
         value = _metric_value(rule, latest, p2p_rows)
-        if value is None:
-            continue
         threshold = clean_number(rule.get("threshold"))
-        if threshold is None or not _condition_met(value, rule.get("operator"), threshold):
+        if value is None or threshold is None:
+            continue
+        if not _condition_met(value, str(rule.get("operator")), threshold):
             continue
         last = _parse_iso(rule.get("last_triggered_at"))
         if last and (now - last).total_seconds() < cooldown_hours * 3600:
             continue
-        email = _get_user_email(sb, str(rule.get("user_id")))
+        user_id = str(rule.get("user_id") or "")
+        email = email_by_user.get(user_id)
+        if not email and user_id:
+            # Rare compatibility fallback when the legacy profile has no email.
+            email = _get_user_email(sb, user_id)
+        triggered.append(
+            {
+                **rule,
+                "email": email,
+                "current_value": value,
+            }
+        )
+    return triggered
+
+
+def check_alert_rules(latest_rows: list[dict[str, Any]], p2p_rows: list[dict[str, Any]]) -> None:
+    sb = get_supabase_client()
+    latest = latest_rows[-1] if latest_rows else None
+    cooldown_hours = env_int("ALERT_COOLDOWN_HOURS", 6)
+    claimed = _claim_triggered_rules_rpc(sb, latest, p2p_rows, cooldown_hours)
+    used_rpc = claimed is not None
+    rules = claimed if used_rpc else _fallback_triggered_rules(sb, latest, p2p_rows, cooldown_hours)
+
+    sent_count = 0
+    notification_rows: list[dict[str, Any]] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for rule in rules:
+        threshold = clean_number(rule.get("threshold"))
+        value = clean_number(rule.get("current_value"))
+        email = rule.get("email")
         status = "failed"
-        if email:
+        if email and value is not None:
             subject = "BTC BigData Alert: điều kiện cảnh báo đã đạt"
             html = f"""
             <h2>BTC BigData Alert</h2>
@@ -547,14 +642,39 @@ def check_alert_rules(latest_rows: list[dict[str, Any]], p2p_rows: list[dict[str
             </ul>
             <p>Dữ liệu chỉ mang tính tham khảo, không phải lời khuyên đầu tư.</p>
             """
-            status = "sent" if _send_resend_email(email, subject, html) else "failed"
+            status = "sent" if _send_resend_email(str(email), subject, html) else "failed"
+        notification_rows.append(
+            {
+                "alert_rule_id": rule.get("id"),
+                "channel": "email",
+                "status": status,
+            }
+        )
+        sent_count += 1 if status == "sent" else 0
+
+        # The RPC claims rows atomically. Legacy databases still need the update.
+        if not used_rpc:
+            try:
+                (
+                    sb.table("alert_rules")
+                    .update({"last_triggered_at": now_iso})
+                    .eq("id", rule.get("id"))
+                    .execute()
+                )
+            except Exception as exc:
+                print(f"Không cập nhật alert_rules {rule.get('id')}: {exc}")
+
+    if notification_rows:
         try:
-            sb.table("notification_log").insert({"alert_rule_id": rule.get("id"), "channel": "email", "status": status}).execute()
-            sb.table("alert_rules").update({"last_triggered_at": now.isoformat()}).eq("id", rule.get("id")).execute()
-            sent_count += 1 if status == "sent" else 0
+            # One insert request replaces one request per triggered rule.
+            sb.table("notification_log").insert(notification_rows).execute()
         except Exception as exc:
-            print(f"Không cập nhật log cảnh báo {rule.get('id')}: {exc}")
-    print(f"Alert rules checked: {len(rules)}, emails sent: {sent_count}")
+            print(f"Không ghi được notification_log theo batch: {exc}")
+
+    print(
+        f"Alert rules checked: {len(rules)}, emails sent: {sent_count}, "
+        f"mode: {'rpc' if used_rpc else 'fallback'}"
+    )
 
 def main():
     hours = env_int("SYNC_HOURS", 720)

@@ -10,7 +10,7 @@ from html import unescape
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 
 router = APIRouter(prefix="/api", tags=["news"])
 
@@ -145,7 +145,8 @@ async def _fetch_news() -> tuple[list[dict[str, Any]], list[str]]:
 
 
 @router.get("/news/latest")
-async def latest_news(limit: int = Query(12, ge=1, le=30), force_refresh: bool = False):
+async def latest_news(response: Response, limit: int = Query(12, ge=1, le=30), force_refresh: bool = False):
+    response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=900"
     now = time.time()
     if not force_refresh and _CACHE["items"] and now < float(_CACHE["expires_at"]):
         data = _CACHE["items"][:limit]

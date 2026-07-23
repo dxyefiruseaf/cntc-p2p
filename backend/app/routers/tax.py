@@ -6,7 +6,7 @@ router = APIRouter(prefix="/api", tags=["tax"])
 
 
 @router.get("/tax-estimate")
-async def tax_estimate(
+def tax_estimate(
     amount: float = Query(..., gt=0),
     country: str = Query("VN"),
     holding_days: int = Query(0, ge=0),

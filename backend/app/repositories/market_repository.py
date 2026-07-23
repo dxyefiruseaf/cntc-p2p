@@ -1,10 +1,98 @@
-from typing import Any
+from typing import Any, Callable, TypeVar
+import logging
+from threading import RLock
+from time import sleep
 
-from app.supabase_client import get_supabase
+import httpx
+
+from app.cache import TTLCache
+from app.supabase_client import get_supabase, reset_supabase_client
 
 OHLCV_TABLE = "btcusdt_ohlcv_1h"
 P2P_TABLE = "p2p_spread_history"
 AI_TABLE = "ai_analysis_history"
+
+# Shared cache prevents the ticker, Dashboard, Decision Hub and charts from
+# repeating the same Supabase reads within a short window. The cache is per
+# backend worker and is invalidated immediately after sync/upsert operations.
+_MARKET_CACHE = TTLCache(max_entries=512)
+LATEST_CACHE_SECONDS = 15
+SERIES_CACHE_SECONDS = 45
+P2P_CACHE_SECONDS = 45
+
+logger = logging.getLogger(__name__)
+T = TypeVar("T")
+_LAST_GOOD_LOCK = RLock()
+_LAST_GOOD_MARKET_READS: dict[str, Any] = {}
+_TRANSIENT_READ_ERRORS = (
+    httpx.ReadError,
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+    OSError,
+)
+
+
+def _remember_last_good(key: str, value: T) -> T:
+    with _LAST_GOOD_LOCK:
+        _LAST_GOOD_MARKET_READS[key] = value
+    return value
+
+
+def _last_good(key: str, default: T) -> T:
+    with _LAST_GOOD_LOCK:
+        value = _LAST_GOOD_MARKET_READS.get(key, default)
+    return value
+
+
+def _safe_market_read(
+    key: str,
+    factory: Callable[[], T],
+    default: T,
+    *,
+    attempts: int = 2,
+) -> T:
+    """Run a Supabase market read without allowing a transport glitch to 500 APIs.
+
+    A failed first attempt resets the cached Supabase client and retries once.
+    If Supabase is still unavailable, the last successful value is returned.
+    The function intentionally applies only to idempotent market reads; writes
+    still surface errors so financial/demo state cannot be silently corrupted.
+    """
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            value = factory()
+            return _remember_last_good(key, value)
+        except _TRANSIENT_READ_ERRORS as exc:
+            last_error = exc
+            logger.warning(
+                "Transient Supabase read failure for %s (attempt %s/%s): %s",
+                key,
+                attempt + 1,
+                attempts,
+                exc,
+            )
+            reset_supabase_client()
+            if attempt + 1 < attempts:
+                sleep(0.12 * (attempt + 1))
+        except Exception as exc:
+            # PostgREST can wrap httpx transport errors in a generic exception.
+            # Market/read endpoints should degrade gracefully instead of making
+            # the entire Admin dashboard unavailable.
+            last_error = exc
+            logger.exception("Supabase market read failed for %s", key)
+            reset_supabase_client()
+            break
+
+    fallback = _last_good(key, default)
+    logger.warning(
+        "Serving last-known-good/default market data for %s after error: %s",
+        key,
+        last_error,
+    )
+    return fallback
 
 
 OHLCV_FIELDS = (
@@ -21,41 +109,80 @@ def _client():
     return get_supabase()
 
 
+def _fetch_latest_ohlcv() -> dict[str, Any] | None:
+    def query() -> dict[str, Any] | None:
+        sb = _client()
+        if sb is None:
+            return None
+        res = sb.table(OHLCV_TABLE).select(OHLCV_FIELDS).order("timestamp", desc=True).limit(1).execute()
+        return res.data[0] if res.data else None
+
+    return _safe_market_read("latest", query, None)
+
+
 def get_latest_ohlcv() -> dict[str, Any] | None:
-    sb = _client()
-    if sb is None:
-        return None
-    res = sb.table(OHLCV_TABLE).select(OHLCV_FIELDS).order("timestamp", desc=True).limit(1).execute()
-    return res.data[0] if res.data else None
+    return _MARKET_CACHE.get_or_set("market:latest", LATEST_CACHE_SECONDS, _fetch_latest_ohlcv)
+
+
+def _fetch_ohlcv(hours: int) -> list[dict[str, Any]]:
+    safe_hours = max(1, min(int(hours), 8760))
+
+    def query() -> list[dict[str, Any]]:
+        sb = _client()
+        if sb is None:
+            return []
+        res = (
+            sb.table(OHLCV_TABLE)
+            .select(OHLCV_FIELDS)
+            .order("timestamp", desc=True)
+            .limit(safe_hours)
+            .execute()
+        )
+        return list(reversed(res.data or []))
+
+    return _safe_market_read(f"ohlcv:{safe_hours}", query, [])
 
 
 def get_ohlcv(hours: int) -> list[dict[str, Any]]:
-    sb = _client()
-    if sb is None:
-        return []
-    res = (
-        sb.table(OHLCV_TABLE)
-        .select(OHLCV_FIELDS)
-        .order("timestamp", desc=True)
-        .limit(hours)
-        .execute()
+    safe_hours = max(1, min(int(hours), 8760))
+    return _MARKET_CACHE.get_or_set(
+        f"market:ohlcv:{safe_hours}",
+        SERIES_CACHE_SECONDS,
+        lambda: _fetch_ohlcv(safe_hours),
     )
-    return list(reversed(res.data or []))
+
+
+def _fetch_p2p_spread(hours: int) -> list[dict[str, Any]]:
+    safe_hours = max(1, min(int(hours), 8760))
+
+    def query() -> list[dict[str, Any]]:
+        sb = _client()
+        if sb is None:
+            return []
+        # Mỗi giờ có 2 dòng BUY/SELL, nên lấy hours*2 bản ghi mới nhất.
+        res = (
+            sb.table(P2P_TABLE)
+            .select(P2P_FIELDS)
+            .order("timestamp", desc=True)
+            .limit(safe_hours * 2)
+            .execute()
+        )
+        return res.data or []
+
+    return _safe_market_read(f"p2p:{safe_hours}", query, [])
 
 
 def get_p2p_spread(hours: int) -> list[dict[str, Any]]:
-    sb = _client()
-    if sb is None:
-        return []
-    # Mỗi giờ có 2 dòng BUY/SELL, nên lấy hours*2 bản ghi mới nhất.
-    res = (
-        sb.table(P2P_TABLE)
-        .select(P2P_FIELDS)
-        .order("timestamp", desc=True)
-        .limit(hours * 2)
-        .execute()
+    safe_hours = max(1, min(int(hours), 8760))
+    return _MARKET_CACHE.get_or_set(
+        f"market:p2p:{safe_hours}",
+        P2P_CACHE_SECONDS,
+        lambda: _fetch_p2p_spread(safe_hours),
     )
-    return res.data or []
+
+
+def invalidate_market_cache() -> None:
+    _MARKET_CACHE.delete_prefix("market:")
 
 
 def insert_ai_history(row: dict[str, Any]) -> None:
@@ -65,17 +192,21 @@ def insert_ai_history(row: dict[str, Any]) -> None:
     sb.table(AI_TABLE).insert(row).execute()
 
 
-def get_ai_history(limit: int = 24) -> list[dict[str, Any]]:
+def get_ai_history(
+    limit: int = 24,
+    *,
+    before_created_at: str | None = None,
+) -> list[dict[str, Any]]:
     sb = _client()
     if sb is None:
         return []
-    res = (
-        sb.table(AI_TABLE)
-        .select("id,created_at,question,answer,verdict,confidence,reasons,risks,model_name")
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
+    safe_limit = max(1, min(int(limit), 100))
+    query = sb.table(AI_TABLE).select(
+        "id,created_at,question,answer,verdict,confidence,reasons,risks,model_name"
     )
+    if before_created_at:
+        query = query.lt("created_at", before_created_at)
+    res = query.order("created_at", desc=True).order("id", desc=True).limit(safe_limit).execute()
     return res.data or []
 
 
@@ -83,7 +214,12 @@ def upsert_ohlcv(rows: list[dict[str, Any]]) -> int:
     sb = _client()
     if sb is None or not rows:
         return 0
-    sb.table(OHLCV_TABLE).upsert(rows, on_conflict="timestamp").execute()
+    # Keep each PostgREST request bounded. Large 8,760-row payloads can exceed
+    # gateway limits and hold a connection for too long on free hosting.
+    chunk_size = 500
+    for start in range(0, len(rows), chunk_size):
+        sb.table(OHLCV_TABLE).upsert(rows[start:start + chunk_size], on_conflict="timestamp").execute()
+    invalidate_market_cache()
     return len(rows)
 
 
@@ -91,7 +227,10 @@ def upsert_p2p(rows: list[dict[str, Any]]) -> int:
     sb = _client()
     if sb is None or not rows:
         return 0
-    sb.table(P2P_TABLE).upsert(rows, on_conflict="timestamp,trade_type").execute()
+    chunk_size = 500
+    for start in range(0, len(rows), chunk_size):
+        sb.table(P2P_TABLE).upsert(rows[start:start + chunk_size], on_conflict="timestamp,trade_type").execute()
+    invalidate_market_cache()
     return len(rows)
 
 # ---------------------------------------------------------------------------
@@ -118,19 +257,25 @@ def insert_ai_history_safe(row: dict[str, Any]) -> None:
         sb.table(AI_TABLE).insert(row).execute()
 
 
-def get_ai_history_for_user(user_id: str, limit: int = 24) -> list[dict[str, Any]]:
+def get_ai_history_for_user(
+    user_id: str,
+    limit: int = 24,
+    *,
+    before_created_at: str | None = None,
+) -> list[dict[str, Any]]:
     sb = _client()
     if sb is None:
         return []
     try:
-        res = (
+        safe_limit = max(1, min(int(limit), 100))
+        query = (
             sb.table(AI_TABLE)
             .select("id,created_at,question,answer,verdict,confidence,reasons,risks,model_name,user_id")
             .eq("user_id", user_id)
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
         )
+        if before_created_at:
+            query = query.lt("created_at", before_created_at)
+        res = query.order("created_at", desc=True).order("id", desc=True).limit(safe_limit).execute()
         return res.data or []
     except Exception:
         return []
@@ -162,16 +307,46 @@ def delete_demo_trade(trade_id: str, user_id: str) -> bool:
         return False
 
 
-def list_demo_trades(user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+def list_demo_trades(
+    user_id: str,
+    limit: int = 20,
+    *,
+    before_created_at: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    side: str | None = None,
+    search: str | None = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+) -> list[dict[str, Any]]:
     sb = _client()
     if sb is None:
         return []
-    res = (
+    safe_limit = max(1, min(int(limit), 100))
+    allowed_sort = {"created_at", "amount_vnd", "amount_usdt", "applied_price"}
+    order_field = sort_by if sort_by in allowed_sort else "created_at"
+    descending = str(sort_order).lower() != "asc"
+    query = (
         sb.table(DEMO_TRADES_TABLE)
         .select("id,user_id,side,amount_vnd,amount_usdt,price_source,applied_price,created_at")
         .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(limit)
+    )
+    if before_created_at and order_field == "created_at":
+        query = query.lt("created_at", before_created_at) if descending else query.gt("created_at", before_created_at)
+    if date_from:
+        query = query.gte("created_at", date_from)
+    if date_to:
+        query = query.lte("created_at", date_to)
+    normalized_side = str(side or "").lower()
+    if normalized_side in {"buy", "sell"}:
+        query = query.eq("side", normalized_side)
+    needle = str(search or "").strip().lower().replace(",", " ")
+    if needle:
+        query = query.or_(f"side.ilike.%{needle}%,price_source.ilike.%{needle}%")
+    res = (
+        query.order(order_field, desc=descending)
+        .order("id", desc=descending)
+        .limit(safe_limit)
         .execute()
     )
     return res.data or []
@@ -222,7 +397,18 @@ def delete_alert_rule(rule_id: str, user_id: str) -> bool:
 
 
 def count_active_alerts(user_id: str) -> int:
-    return len([r for r in list_alert_rules(user_id) if r.get("active") is not False])
+    sb = _client()
+    if sb is None:
+        return 0
+    res = (
+        sb.table(ALERT_RULES_TABLE)
+        .select("id", count="exact")
+        .eq("user_id", user_id)
+        .eq("active", True)
+        .limit(1)
+        .execute()
+    )
+    return int(res.count or 0)
 
 
 def create_order(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -237,7 +423,7 @@ def get_order_by_txn_ref(txn_ref: str) -> dict[str, Any] | None:
     sb = _client()
     if sb is None:
         return None
-    res = sb.table(ORDERS_TABLE).select("*").eq("vnp_txn_ref", txn_ref).limit(1).execute()
+    res = sb.table(ORDERS_TABLE).select("id,user_id,plan_id,amount_vnd,vnp_txn_ref,status,created_at,paid_at").eq("vnp_txn_ref", txn_ref).limit(1).execute()
     return res.data[0] if res.data else None
 
 
@@ -268,6 +454,7 @@ def get_active_subscription(user_id: str) -> dict[str, Any] | None:
         .select("user_id,plan_id,active,expires_at")
         .eq("user_id", user_id)
         .eq("active", True)
+        .limit(1)
         .execute()
     )
     return res.data[0] if res.data else None
@@ -307,7 +494,7 @@ def get_wallet_for_user(user_id: str) -> dict[str, Any]:
     sb = _client()
     if sb is None:
         return {"user_id": user_id, "balance_vnd": 0, "balance_usdt_demo": 0}
-    res = sb.table(WALLETS_TABLE).select("*").eq("user_id", user_id).limit(1).execute()
+    res = sb.table(WALLETS_TABLE).select("user_id,balance_vnd,balance_usdt_demo,created_at,updated_at").eq("user_id", user_id).limit(1).execute()
     if res.data:
         return res.data[0]
     created = sb.table(WALLETS_TABLE).insert({"user_id": user_id, "balance_vnd": 0, "balance_usdt_demo": 0}).execute()
@@ -329,22 +516,75 @@ def get_wallet_topup_by_txn_ref(txn_ref: str) -> dict[str, Any] | None:
     sb = _client()
     if sb is None:
         return None
-    res = sb.table(WALLET_TOPUPS_TABLE).select("*").eq("vnp_txn_ref", txn_ref).limit(1).execute()
+    res = sb.table(WALLET_TOPUPS_TABLE).select("id,user_id,amount_vnd,vnp_txn_ref,status,payment_url,created_at,paid_at").eq("vnp_txn_ref", txn_ref).limit(1).execute()
     return res.data[0] if res.data else None
 
 
-def list_wallet_transactions(user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+def get_wallet_snapshot(
+    user_id: str,
+    limit: int = 20,
+    *,
+    before_created_at: str | None = None,
+) -> dict[str, Any]:
+    sb = _client()
+    if sb is not None:
+        try:
+            data = sb.rpc("wallet_snapshot", {
+                "p_user_id": user_id,
+                "p_limit": max(1, min(int(limit), 100)),
+                "p_before": before_created_at,
+            }).execute().data
+            if isinstance(data, dict):
+                return data
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                return data[0]
+        except Exception:
+            pass
+    wallet = get_wallet_for_user(user_id)
+    transactions = list_wallet_transactions(
+        user_id,
+        limit,
+        before_created_at=before_created_at,
+    )
+    return {"wallet": wallet, "transactions": transactions}
+
+
+def get_trade_terminal_account_snapshot(user_id: str, limit: int = 20) -> dict[str, Any] | None:
+    sb = _client()
+    if sb is None:
+        return None
+    try:
+        data = sb.rpc("trade_terminal_account_snapshot", {
+            "p_user_id": user_id,
+            "p_limit": max(1, min(int(limit), 50)),
+        }).execute().data
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0]
+    except Exception:
+        return None
+    return None
+
+
+def list_wallet_transactions(
+    user_id: str,
+    limit: int = 20,
+    *,
+    before_created_at: str | None = None,
+) -> list[dict[str, Any]]:
     sb = _client()
     if sb is None:
         return []
-    res = (
+    safe_limit = max(1, min(int(limit), 100))
+    query = (
         sb.table(WALLET_TRANSACTIONS_TABLE)
         .select("id,user_id,type,amount_vnd,balance_after_vnd,description,ref_id,created_at")
         .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
     )
+    if before_created_at:
+        query = query.lt("created_at", before_created_at)
+    res = query.order("created_at", desc=True).order("id", desc=True).limit(safe_limit).execute()
     return res.data or []
 
 
@@ -357,10 +597,22 @@ def _insert_wallet_transaction(row: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def mark_wallet_topup_success(txn_ref: str) -> dict[str, Any] | None:
-    """Idempotently mark a top-up successful and credit the demo wallet."""
+    """Idempotently mark a top-up successful and credit the demo wallet.
+
+    New databases use one PostgreSQL transaction through RPC. The existing
+    multi-request implementation remains as a backward-compatible fallback.
+    """
     sb = _client()
     if sb is None:
         return None
+    try:
+        rpc_data = sb.rpc("credit_wallet_topup_atomic", {"p_txn_ref": txn_ref}).execute().data
+        if isinstance(rpc_data, dict):
+            return rpc_data
+        if isinstance(rpc_data, list) and rpc_data:
+            return rpc_data[0]
+    except Exception:
+        pass
     topup = get_wallet_topup_by_txn_ref(txn_ref)
     if not topup:
         return None
@@ -455,14 +707,24 @@ def credit_wallet_balance(user_id: str, amount_vnd: int | float, description: st
     return {"wallet": wallet_after, "transaction": tx}
 
 
-def summarize_demo_trades(user_id: str, limit: int = 500) -> dict[str, Any]:
-    """Summarise the virtual BTC portfolio from recorded demo trades.
+def get_demo_portfolio(user_id: str) -> dict[str, Any] | None:
+    sb = _client()
+    if sb is None:
+        return None
+    try:
+        res = (
+            sb.table("demo_portfolios")
+            .select("position_btc,avg_entry_vnd,cost_basis_vnd,realized_pnl_vnd,total_buy_vnd,total_sell_vnd,buys,sells,trades_count,updated_at")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except Exception:
+        return None
 
-    The legacy `amount_usdt` field is reused as the simulated BTC quantity in the
-    trading-terminal UI. This keeps the database schema unchanged while still
-    allowing a realistic wallet + portfolio flow for classroom demos.
-    """
-    rows = list(reversed(list_demo_trades(user_id, limit)))
+
+def summarize_demo_trade_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     position_btc = 0.0
     cost_basis_vnd = 0.0
     realized_pnl_vnd = 0.0
@@ -470,32 +732,28 @@ def summarize_demo_trades(user_id: str, limit: int = 500) -> dict[str, Any]:
     total_sell_vnd = 0.0
     buys = 0
     sells = 0
-
-    for row in rows:
+    ordered_rows = list(reversed(rows))
+    for row in ordered_rows:
         side = str(row.get("side") or "").upper()
         qty = _num(row.get("amount_usdt"))
         gross_vnd = _num(row.get("amount_vnd"))
         if qty <= 0 or gross_vnd <= 0:
             continue
-
         if side == "BUY":
             position_btc += qty
             cost_basis_vnd += gross_vnd
             total_buy_vnd += gross_vnd
             buys += 1
-            continue
-
-        if side == "SELL":
+        elif side == "SELL":
             sells += 1
             total_sell_vnd += gross_vnd
             if position_btc > 0:
                 used_qty = min(qty, position_btc)
-                avg_cost = cost_basis_vnd / position_btc if position_btc > 0 else 0.0
+                avg_cost = cost_basis_vnd / position_btc
                 released_cost = avg_cost * used_qty
                 realized_pnl_vnd += gross_vnd - released_cost
                 position_btc -= used_qty
                 cost_basis_vnd = max(0.0, cost_basis_vnd - released_cost)
-
     avg_entry_vnd = cost_basis_vnd / position_btc if position_btc > 0 else 0.0
     return {
         "position_btc": round(position_btc, 8),
@@ -506,8 +764,20 @@ def summarize_demo_trades(user_id: str, limit: int = 500) -> dict[str, Any]:
         "total_sell_vnd": round(total_sell_vnd, 2),
         "buys": buys,
         "sells": sells,
-        "trades_count": len(rows),
+        "trades_count": len(ordered_rows),
     }
+
+
+def summarize_demo_trades(user_id: str, limit: int = 500) -> dict[str, Any]:
+    """Return an O(1) portfolio snapshot when the performance migration exists."""
+    snapshot = get_demo_portfolio(user_id)
+    if snapshot:
+        return {key: snapshot.get(key, 0) for key in (
+            "position_btc", "avg_entry_vnd", "cost_basis_vnd", "realized_pnl_vnd",
+            "total_buy_vnd", "total_sell_vnd", "buys", "sells", "trades_count"
+        )}
+    rows = list_demo_trades(user_id, min(max(1, int(limit)), 500))
+    return summarize_demo_trade_rows(rows)
 
 
 def execute_demo_trade(
@@ -526,6 +796,29 @@ def execute_demo_trade(
     amount_btc = _num(amount_asset)
     if gross_vnd <= 0 or amount_btc <= 0:
         raise ValueError("Giá trị giao dịch mô phỏng không hợp lệ")
+
+    sb = _client()
+    if sb is not None:
+        try:
+            rpc_data = sb.rpc("execute_demo_trade_atomic", {
+                "p_user_id": user_id,
+                "p_side": side_norm.lower(),
+                "p_amount_vnd": gross_vnd,
+                "p_amount_btc": amount_btc,
+                "p_price_source": price_source,
+                "p_applied_price": _num(applied_price) if applied_price is not None else None,
+            }).execute().data
+            if isinstance(rpc_data, dict):
+                return rpc_data
+            if isinstance(rpc_data, list) and rpc_data:
+                return rpc_data[0]
+        except Exception as exc:
+            # Raise business validation errors from the database; only fall back
+            # when the migration/RPC is not installed yet.
+            message = str(exc)
+            business_errors = ("Số dư ví demo không đủ", "Số dư BTC demo không đủ", "Chiều giao dịch", "Giá trị giao dịch")
+            if any(item in message for item in business_errors):
+                raise ValueError(message) from exc
 
     portfolio_before = summarize_demo_trades(user_id)
     wallet_before = get_wallet_for_user(user_id)

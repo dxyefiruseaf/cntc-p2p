@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import urllib.parse
@@ -10,6 +11,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from app.auth import get_current_user
 from app.config import get_settings
@@ -57,7 +59,7 @@ def _client_ip(request: Request) -> str:
 
 
 @router.post("/create")
-async def create_payment(payload: CreatePaymentRequest, request: Request):
+def create_payment(payload: CreatePaymentRequest, request: Request):
     settings = get_settings()
     user = get_current_user(request)
     plan = PLANS.get(payload.plan_id)
@@ -170,7 +172,7 @@ def _is_subscription_expired(subscription: dict[str, Any] | None) -> bool:
 
 
 @router.get("/subscription")
-async def subscription_status(request: Request):
+def subscription_status(request: Request):
     user = get_current_user(request)
     subscription = get_active_subscription(user["id"])
     if _is_subscription_expired(subscription):
@@ -211,7 +213,7 @@ async def subscription_status(request: Request):
 
 
 @router.post("/cancel-subscription")
-async def cancel_subscription(request: Request):
+def cancel_subscription(request: Request):
     user = get_current_user(request)
     cancel_user_subscriptions(user["id"])
     return {
@@ -225,7 +227,7 @@ async def cancel_subscription(request: Request):
 
 
 @router.get("/return")
-async def payment_return(request: Request):
+def payment_return(request: Request):
     params = dict(request.query_params)
     verified = _verify_vnp(params)
     txn_ref = str(params.get("vnp_TxnRef") or "")
@@ -253,28 +255,33 @@ async def payment_ipn(request: Request):
         return {"RspCode": "97", "Message": "Invalid signature"}
 
     txn_ref = params.get("vnp_TxnRef")
-    order = get_order_by_txn_ref(str(txn_ref)) if txn_ref else None
+    order = await run_in_threadpool(get_order_by_txn_ref, str(txn_ref)) if txn_ref else None
     if not order:
         return {"RspCode": "01", "Message": "Order not found"}
 
     if params.get("vnp_ResponseCode") == "00":
         paid_at = datetime.now(timezone.utc).isoformat()
-        update_order_status(str(txn_ref), "success", paid_at)
         plan = PLANS.get(order["plan_id"], PLANS["premium_monthly"])
-        upsert_subscription({
-            "user_id": order["user_id"],
-            "plan_id": order["plan_id"],
-            "active": True,
-            "expires_at": (datetime.now(timezone.utc) + timedelta(days=plan["days"])).isoformat(),
-        })
+        await asyncio.gather(
+            run_in_threadpool(update_order_status, str(txn_ref), "success", paid_at),
+            run_in_threadpool(
+                upsert_subscription,
+                {
+                    "user_id": order["user_id"],
+                    "plan_id": order["plan_id"],
+                    "active": True,
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(days=plan["days"])).isoformat(),
+                },
+            ),
+        )
         return {"RspCode": "00", "Message": "Confirm Success"}
 
-    update_order_status(str(txn_ref), "failed")
+    await run_in_threadpool(update_order_status, str(txn_ref), "failed")
     return {"RspCode": "00", "Message": "Confirm Failed Payment"}
 
 
 @router.get("/status")
-async def payment_status(txn_ref: str):
+def payment_status(txn_ref: str):
     order = get_order_by_txn_ref(txn_ref)
     if not order:
         raise HTTPException(status_code=404, detail="Không tìm thấy đơn hàng")

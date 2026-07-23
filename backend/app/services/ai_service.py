@@ -13,6 +13,10 @@ import httpx
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+_AI_HTTP_CLIENT = httpx.AsyncClient(
+    timeout=httpx.Timeout(30.0, connect=10.0),
+    limits=httpx.Limits(max_connections=80, max_keepalive_connections=30, keepalive_expiry=30.0),
+)
 
 DISCLAIMER = "Thông tin chỉ mang tính tham khảo, không phải lời khuyên đầu tư cá nhân."
 
@@ -595,24 +599,22 @@ async def _post_with_retry(
     headers: dict[str, str] | None = None,
     attempts: int = 2,
 ) -> dict[str, Any]:
-    timeout = httpx.Timeout(30.0, connect=10.0)
     last_error: Exception | None = None
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for attempt in range(attempts):
-            try:
-                response = await client.post(url, json=body, headers=headers)
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                retryable = exc.response.status_code == 429 or exc.response.status_code >= 500
-                if not retryable or attempt + 1 >= attempts:
-                    break
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_error = exc
-                if attempt + 1 >= attempts:
-                    break
-            await asyncio.sleep(0.8 * (attempt + 1))
+    for attempt in range(attempts):
+        try:
+            response = await _AI_HTTP_CLIENT.post(url, json=body, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            retryable = exc.response.status_code == 429 or exc.response.status_code >= 500
+            if not retryable or attempt + 1 >= attempts:
+                break
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            last_error = exc
+            if attempt + 1 >= attempts:
+                break
+        await asyncio.sleep(0.8 * (attempt + 1))
     if last_error:
         raise last_error
     raise RuntimeError("Không nhận được phản hồi từ AI provider.")

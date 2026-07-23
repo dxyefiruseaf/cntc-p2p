@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
+from starlette.concurrency import run_in_threadpool
 
 from app.auth import get_optional_user
 from app.data_loader import load_mock_data
@@ -54,7 +56,12 @@ def _normalize_p2p(rows: list[dict[str, Any]], *, source: str, hours: int = 168)
 
 
 async def _market_context() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    latest = get_latest_ohlcv()
+    # Supabase Python calls are synchronous. Run independent reads concurrently
+    # in the thread pool so AI requests do not block the FastAPI event loop.
+    latest, p2p_rows = await asyncio.gather(
+        run_in_threadpool(get_latest_ohlcv),
+        run_in_threadpool(get_p2p_spread, 168),
+    )
     latest_source = "supabase"
     if not latest:
         latest = await fetch_public_api("/api/latest")
@@ -71,7 +78,6 @@ async def _market_context() -> tuple[dict[str, Any], dict[str, Any], dict[str, A
         if public_summary:
             summary = public_summary
 
-    p2p_rows = get_p2p_spread(168)
     if p2p_rows:
         p2p = _normalize_p2p(p2p_rows, source="supabase")
     else:
@@ -171,9 +177,8 @@ async def ask_ai(payload: AskAIRequest, request: Request):
         "risk_factors": risk.get("factors", []) if is_market_explanation else [],
     }
 
-    user = get_optional_user(request)
-    insert_ai_history_safe(
-        {
+    user = await run_in_threadpool(get_optional_user, request)
+    history_row = {
             "question": question,
             "answer": answer,
             "verdict": response["verdict"],
@@ -193,16 +198,35 @@ async def ask_ai(payload: AskAIRequest, request: Request):
             "user_id": user["id"] if user else None,
             "created_at": created_at,
         }
-    )
+    await run_in_threadpool(insert_ai_history_safe, history_row)
     return response
 
 
 @router.get("/history")
-async def ai_history(request: Request, limit: int = Query(24, ge=1, le=200)):
-    user = get_optional_user(request)
-    rows = get_ai_history_for_user(user["id"], limit) if user else get_ai_history(limit)
+async def ai_history(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    before: str | None = Query(None),
+):
+    user = await run_in_threadpool(get_optional_user, request)
+    if user:
+        rows = await run_in_threadpool(
+            get_ai_history_for_user,
+            user["id"],
+            limit,
+            before_created_at=before,
+        )
+    else:
+        rows = await run_in_threadpool(get_ai_history, limit, before_created_at=before)
     if rows:
-        return {"count": len(rows), "data": rows, "scope": "user" if user else "public"}
+        next_cursor = rows[-1].get("created_at") if len(rows) == limit else None
+        return {
+            "count": len(rows),
+            "data": rows,
+            "scope": "user" if user else "public",
+            "next_cursor": next_cursor,
+            "has_next": bool(next_cursor),
+        }
 
     public = await fetch_public_api(f"/api/ai/history?limit={limit}")
     if public:

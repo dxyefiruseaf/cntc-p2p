@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.repositories.market_repository import (
     create_wallet_topup,
     get_wallet_for_user,
+    get_wallet_snapshot,
     get_wallet_topup_by_txn_ref,
     list_wallet_transactions,
     mark_wallet_topup_failed,
@@ -69,26 +70,31 @@ def _wallet_return_url(request: Request) -> str:
 
 
 @router.get("/me")
-async def wallet_me(request: Request):
+def wallet_me(request: Request):
     user = get_current_user(request)
-    wallet = get_wallet_for_user(user["id"])
-    transactions = list_wallet_transactions(user["id"], limit=10)
+    snapshot = get_wallet_snapshot(user["id"], limit=10)
     return {
-        "wallet": wallet,
-        "transactions": transactions,
+        "wallet": snapshot.get("wallet") or {},
+        "transactions": snapshot.get("transactions") or [],
         "sandbox": True,
         "disclaimer": "Ví điện tử demo phục vụ học phần, không phát sinh tiền thật.",
     }
 
 
 @router.get("/transactions")
-async def wallet_transactions(request: Request, limit: int = 50):
+def wallet_transactions(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    before: str | None = Query(None),
+):
     user = get_current_user(request)
-    return {"data": list_wallet_transactions(user["id"], limit=max(1, min(limit, 100)))}
+    rows = list_wallet_transactions(user["id"], limit=limit, before_created_at=before)
+    next_cursor = rows[-1].get("created_at") if len(rows) == limit else None
+    return {"count": len(rows), "data": rows, "next_cursor": next_cursor, "has_next": bool(next_cursor)}
 
 
 @router.post("/topup/create")
-async def create_topup(payload: CreateWalletTopupRequest, request: Request):
+def create_topup(payload: CreateWalletTopupRequest, request: Request):
     """Create a wallet top-up.
 
     Default course mode is internal demo payment: no bank app, no real money, no VNPay key required.
@@ -178,7 +184,7 @@ async def create_topup(payload: CreateWalletTopupRequest, request: Request):
 
 
 @router.post("/topup/demo-confirm")
-async def demo_confirm_topup(payload: DemoConfirmTopupRequest, request: Request):
+def demo_confirm_topup(payload: DemoConfirmTopupRequest, request: Request):
     """Confirm a demo top-up without real money.
 
     This endpoint is intentionally available only when WALLET_DEMO_PAYMENT_ENABLED=true.
@@ -207,7 +213,7 @@ async def demo_confirm_topup(payload: DemoConfirmTopupRequest, request: Request)
 
 
 @router.get("/topup/status")
-async def topup_status(request: Request, txn_ref: str):
+def topup_status(request: Request, txn_ref: str):
     user = get_current_user(request)
     topup = get_wallet_topup_by_txn_ref(txn_ref)
     if not topup or topup.get("user_id") != user["id"]:
@@ -216,7 +222,7 @@ async def topup_status(request: Request, txn_ref: str):
 
 
 @router.get("/topup/return", response_class=HTMLResponse, name="wallet_topup_return")
-async def wallet_topup_return(request: Request):
+def wallet_topup_return(request: Request):
     params = dict(request.query_params)
     ok = _verify_vnp(params)
     txn_ref = str(params.get("vnp_TxnRef", ""))

@@ -1,32 +1,27 @@
-# BTC BigData Frontend
+# BTC BigData Platform — React Figma Redesign
 
-Frontend Vite dùng để minh chứng trực tiếp cho bài báo cáo Công nghệ dịch vụ tài chính.
+Frontend React + TypeScript + TailwindCSS được tích hợp từ thiết kế Figma/Make và kết nối với backend FastAPI/Supabase hiện có.
 
-## Route chính
+## Cấu hình
 
-- `#business` — Chương 1: đề xuất mô hình kinh doanh.
-- `#bmc` — Chương 2: Business Model Canvas 9 thành phần.
-- `#experiment` — Chương 3: kịch bản thử nghiệm, gọi API thật.
-- `#dashboard` — Dashboard giá và tín hiệu.
-- `#chart` — Biểu đồ kỹ thuật.
-- `#p2p` — P2P spread.
-- `#tax` — Ước tính thuế.
-- `#chat` — Chat AI Advisor.
-- `#trade` — Mô phỏng giao dịch.
-- `#history` — Lịch sử AI.
+Sao chép `.env.example` thành `.env` và điền:
+
+- `VITE_API_BASE_URL`
+- `VITE_DATA_API_BASE_URL`
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_ANON_KEY`
 
 ## Chạy local
 
 ```bash
 npm install
-cp .env.example .env
 npm run dev
 ```
 
-`.env`:
+## Build
 
-```env
-VITE_API_BASE_URL=http://localhost:8000
+```bash
+npm run build
 ```
 
-Frontend chỉ gọi backend FastAPI. Không đưa API key AI hoặc Supabase service role key vào frontend.
+Node.js 22 và npm 10 được khuyến nghị.
