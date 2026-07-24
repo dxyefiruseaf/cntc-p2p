@@ -31,10 +31,13 @@ def auth_me(request: Request, response: Response):
     resolved_role = "admin" if "admin" in {profile_role, metadata_role} else (profile_role or metadata_role or "user")
     resolved_status = str(profile.get("status") or "active").lower()
 
+    user_metadata = user.get("user_metadata") or {}
     resolved_profile = {
         **profile,
         "user_id": profile.get("user_id") or user["id"],
         "email": profile.get("email") or user.get("email"),
+        "full_name": profile.get("full_name") or user_metadata.get("full_name") or user_metadata.get("name"),
+        "password_set": bool(profile.get("password_set") or user_metadata.get("password_set")),
         "role": resolved_role,
         "status": resolved_status,
     }

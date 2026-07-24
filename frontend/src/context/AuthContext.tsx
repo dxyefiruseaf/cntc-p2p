@@ -12,8 +12,10 @@ interface AuthState {
   isAuthenticated: boolean;
   isAdmin: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  sendOtp: (email: string) => Promise<void>;
+  sendRegistrationOtp: (email: string, fullName: string) => Promise<void>;
+  sendRecoveryOtp: (email: string) => Promise<void>;
   verifyOtp: (email: string, token: string) => Promise<void>;
+  completePasswordSetup: (password: string, fullName?: string) => Promise<void>;
   updatePassword: (password: string) => Promise<void>;
   updateProfile: (fullName: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -38,8 +40,6 @@ function firstText(...values: unknown[]): string {
 
 function resolveRole(...values: unknown[]): string {
   const roles = values.map(value => String(value ?? '').trim().toLowerCase()).filter(Boolean);
-  // Keep frontend authorization semantics aligned with backend require_admin:
-  // a signed admin role in either profile or app_metadata is sufficient.
   if (roles.includes('admin')) return 'admin';
   return roles[0] || 'user';
 }
@@ -52,6 +52,16 @@ function isSameProfileUser(candidate: AuthProfile | null, user: User | null | un
   if (!candidate || !user) return false;
   const candidateId = firstText(candidate.user_id, candidate.id);
   return Boolean(candidateId && candidateId === user.id);
+}
+
+function passwordFlag(...values: unknown[]): boolean {
+  for (const value of values) {
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (['true', '1', 'yes'].includes(normalized)) return true;
+    if (['false', '0', 'no'].includes(normalized)) return false;
+  }
+  return false;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -97,10 +107,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           currentUser.user_metadata?.full_name,
           currentUser.user_metadata?.name,
         ),
-        // Do not overwrite an admin role with undefined. Admin role may live in
-        // user_profiles, app_metadata, or legacy user_metadata.
         role: resolveRole(result.role, apiProfile.role, roleFromUser(currentUser)),
         status: firstText(result.status, apiProfile.status, 'active').toLowerCase(),
+        password_set: passwordFlag(apiProfile.password_set, currentUser.user_metadata?.password_set),
       };
       saveProfile(merged);
     } catch (error) {
@@ -110,8 +119,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // A temporary backend/CORS outage must not visually downgrade a valid
-      // admin. Supabase app_metadata is signed and cannot be edited by users.
       const cached = storedProfile();
       const sameUserCache = isSameProfileUser(cached, currentUser) ? cached : null;
       const fallback: AuthProfile = {
@@ -126,6 +133,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ),
         role: resolveRole(roleFromUser(currentUser), sameUserCache?.role),
         status: firstText(sameUserCache?.status, 'active').toLowerCase(),
+        password_set: passwordFlag(currentUser.user_metadata?.password_set, sameUserCache?.password_set),
       };
       saveProfile(fallback);
     }
@@ -156,8 +164,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      // Supabase advises against awaiting other auth calls directly inside this
-      // callback. Schedule the async profile resolution outside the callback.
       window.setTimeout(() => {
         void (async () => {
           if (!mounted.current) return;
@@ -197,11 +203,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setReady(true);
   }, [loadProfile]);
 
-  const sendOtp = useCallback(async (email: string) => {
+  const sendRegistrationOtp = useCallback(async (email: string, fullName: string) => {
+    if (!supabase) throw new Error('Supabase Auth chưa được cấu hình.');
+    const normalizedName = fullName.trim();
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: true,
+        data: {
+          full_name: normalizedName,
+          name: normalizedName,
+          registration_method: 'email_otp',
+          registration_pending: true,
+          password_set: false,
+        },
+      },
+    });
+    if (error) throw error;
+  }, []);
+
+  const sendRecoveryOtp = useCallback(async (email: string) => {
     if (!supabase) throw new Error('Supabase Auth chưa được cấu hình.');
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { shouldCreateUser: true },
+      options: { shouldCreateUser: false },
     });
     if (error) throw error;
   }, []);
@@ -219,28 +244,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setReady(true);
   }, [loadProfile]);
 
-  const updatePassword = useCallback(async (password: string) => {
+  const completePasswordSetup = useCallback(async (password: string, fullName?: string) => {
     if (!supabase) throw new Error('Supabase Auth chưa được cấu hình.');
-    const { error } = await supabase.auth.updateUser({
-      password,
-      data: { password_set: true, password_updated_at: new Date().toISOString() },
-    });
+    const normalizedName = String(fullName || '').trim();
+    const metadata: Record<string, unknown> = {
+      password_set: true,
+      password_updated_at: new Date().toISOString(),
+      registration_pending: false,
+    };
+    if (normalizedName) {
+      metadata.full_name = normalizedName;
+      metadata.name = normalizedName;
+    }
+
+    const { data, error } = await supabase.auth.updateUser({ password, data: metadata });
     if (error) throw error;
-    // Refreshing the profile preserves the server-side admin role after a
-    // password update and updates password_set when the backend exposes it.
-    await loadProfile();
+    clearApiCache();
+    await loadProfile(data.user);
   }, [loadProfile]);
+
+  const updatePassword = useCallback(async (password: string) => {
+    await completePasswordSetup(password);
+  }, [completePasswordSetup]);
 
   const updateProfile = useCallback(async (fullName: string) => {
     if (!supabase) throw new Error('Supabase Auth chưa được cấu hình.');
-    const { error } = await supabase.auth.updateUser({ data: { full_name: fullName, name: fullName } });
+    const { data, error } = await supabase.auth.updateUser({ data: { full_name: fullName, name: fullName } });
     if (error) throw error;
     setProfile(current => {
       const next = { ...(current || {}), full_name: fullName } as AuthProfile;
       localStorage.setItem(PROFILE_KEY, JSON.stringify(next));
       return next;
     });
-  }, []);
+    await loadProfile(data.user);
+  }, [loadProfile]);
 
   const signOut = useCallback(async () => {
     clearApiCache();
@@ -272,13 +309,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isAuthenticated: Boolean(session),
     isAdmin: resolvedRole === 'admin',
     signIn,
-    sendOtp,
+    sendRegistrationOtp,
+    sendRecoveryOtp,
     verifyOtp,
+    completePasswordSetup,
     updatePassword,
     updateProfile,
     signOut,
     refreshProfile: async () => loadProfile(session?.user),
-  }), [ready, session, profile, resolvedRole, signIn, sendOtp, verifyOtp, updatePassword, updateProfile, signOut, loadProfile]);
+  }), [
+    ready,
+    session,
+    profile,
+    resolvedRole,
+    signIn,
+    sendRegistrationOtp,
+    sendRecoveryOtp,
+    verifyOtp,
+    completePasswordSetup,
+    updatePassword,
+    updateProfile,
+    signOut,
+    loadProfile,
+  ]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
