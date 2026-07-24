@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { RemoteDataStatusBar } from './DataStatusBar';
 
 const nav = [
   { path: '/admin', icon: '⬡', label: 'Tổng quan' },
@@ -63,7 +64,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
       </aside>
 
       <main className="min-h-screen lg:ml-60">
-        <div className="mx-auto w-full max-w-[1600px] p-4 pt-16 sm:p-6 lg:pt-6">{children}</div>
+        <div className="mx-auto w-full max-w-[1600px] p-4 pt-16 sm:p-6 lg:pt-6"><RemoteDataStatusBar />{children}</div>
       </main>
     </div>
   );

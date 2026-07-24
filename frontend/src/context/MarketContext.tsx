@@ -24,7 +24,9 @@ interface CachedMarketSnapshot {
 const MARKET_CACHE_KEY = 'btc_market_overview_v2';
 const MARKET_CACHE_MAX_AGE = 10 * 60_000;
 const DEFAULT_HOURS = 168;
+const MAX_CACHE_HOURS = 720;
 const AUTO_REFRESH_MS = 60_000;
+const LONG_RANGE_REFRESH_MS = 5 * 60_000;
 const MarketContext = createContext<MarketState | null>(null);
 
 function readCachedSnapshot(): CachedMarketSnapshot | null {
@@ -47,14 +49,14 @@ function cacheSnapshot(data: MarketOverview): void {
       ...data,
       ohlcv: {
         ...data.ohlcv,
-        hours: Math.min(Number(data.ohlcv?.hours || DEFAULT_HOURS), DEFAULT_HOURS),
-        count: Math.min(ohlcvRows.length, DEFAULT_HOURS),
-        data: ohlcvRows.slice(-DEFAULT_HOURS),
+        hours: Math.min(Number(data.ohlcv?.hours || DEFAULT_HOURS), MAX_CACHE_HOURS),
+        count: Math.min(ohlcvRows.length, MAX_CACHE_HOURS),
+        data: ohlcvRows.slice(-MAX_CACHE_HOURS),
       },
       p2p: {
         ...data.p2p,
-        count: Math.min(p2pRows.length, DEFAULT_HOURS * 2),
-        data: p2pRows.slice(0, DEFAULT_HOURS * 2),
+        count: Math.min(p2pRows.length, MAX_CACHE_HOURS * 2),
+        data: p2pRows.slice(0, MAX_CACHE_HOURS * 2),
       },
     };
     window.sessionStorage.setItem(MARKET_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), data: compact }));
@@ -139,18 +141,20 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refresh(DEFAULT_HOURS);
     const interval = window.setInterval(() => {
-      const stale = Date.now() - lastUpdatedRef.current >= AUTO_REFRESH_MS;
-      if (document.visibilityState === 'visible' && stale && loadedHoursRef.current <= DEFAULT_HOURS) {
-        void refresh(DEFAULT_HOURS);
+      const refreshWindow = loadedHoursRef.current > DEFAULT_HOURS ? LONG_RANGE_REFRESH_MS : AUTO_REFRESH_MS;
+      const stale = Date.now() - lastUpdatedRef.current >= refreshWindow;
+      if (document.visibilityState === 'visible' && stale) {
+        void refresh(Math.max(DEFAULT_HOURS, loadedHoursRef.current || DEFAULT_HOURS));
       }
     }, AUTO_REFRESH_MS);
     const onVisibility = () => {
-      const stale = Date.now() - lastUpdatedRef.current >= 45_000;
-      if (document.visibilityState === 'visible' && stale && loadedHoursRef.current <= DEFAULT_HOURS) {
-        void refresh(DEFAULT_HOURS);
+      const refreshWindow = loadedHoursRef.current > DEFAULT_HOURS ? LONG_RANGE_REFRESH_MS : 45_000;
+      const stale = Date.now() - lastUpdatedRef.current >= refreshWindow;
+      if (document.visibilityState === 'visible' && stale) {
+        void refresh(Math.max(DEFAULT_HOURS, loadedHoursRef.current || DEFAULT_HOURS));
       }
     };
-    const onOnline = () => void refresh(Math.max(DEFAULT_HOURS, Math.min(loadedHoursRef.current, DEFAULT_HOURS)), true);
+    const onOnline = () => void refresh(Math.max(DEFAULT_HOURS, loadedHoursRef.current || DEFAULT_HOURS), true);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('online', onOnline);
     return () => {

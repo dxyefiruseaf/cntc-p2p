@@ -127,7 +127,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
       timeout = 15_000,
       cacheTtl: _cacheTtl,
       force: _force,
-      auth = true,
+      auth = !isDataPath(path),
       retries = method === 'GET' ? 1 : 0,
       retryDelay = 650,
       signal: externalSignal,

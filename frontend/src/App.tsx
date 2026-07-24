@@ -8,6 +8,7 @@ import AdminLayout from './components/AdminLayout';
 import { PageLoader } from './components/Feedback';
 import { useAuth } from './context/AuthContext';
 import { MarketProvider } from './context/MarketContext';
+import { MarketDataStatusBar } from './components/DataStatusBar';
 
 const Login = lazy(() => import('./pages/Login'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
@@ -80,6 +81,7 @@ function UserShell() {
         style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}
       >
         <main id="main-content" className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-5 sm:px-5">
+          <MarketDataStatusBar />
           <Suspense fallback={<PageLoader />}><Outlet /></Suspense>
         </main>
         <Footer />
