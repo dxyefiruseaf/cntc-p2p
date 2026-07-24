@@ -21,6 +21,7 @@ from app.repositories.market_repository import (
     list_demo_trades,
     summarize_demo_trades,
 )
+from app.services.asset_service import build_demo_asset_snapshot
 from app.services.indicator_service import calculate_risk_score
 
 router = APIRouter(prefix="/api/demo-trades", tags=["demo-trades"])
@@ -89,7 +90,13 @@ async def create_trade(payload: DemoTradeCreate, request: Request):
 
     if not result:
         raise HTTPException(status_code=503, detail="Không lưu được giao dịch demo")
-    return result
+    assets = await run_in_threadpool(
+        build_demo_asset_snapshot,
+        user["id"],
+        wallet=result.get("wallet") or None,
+        portfolio=result.get("portfolio") or None,
+    )
+    return {**result, **assets}
 
 
 @router.get("")
@@ -107,7 +114,7 @@ async def get_trades(
 ):
     user = await run_in_threadpool(get_current_user, request)
     _private_cache_headers(response, 8)
-    rows, portfolio = await asyncio.gather(
+    rows, portfolio, wallet = await asyncio.gather(
         run_in_threadpool(
             list_demo_trades,
             user["id"],
@@ -121,12 +128,19 @@ async def get_trades(
             sort_order=sort_order,
         ),
         run_in_threadpool(summarize_demo_trades, user["id"]),
+        run_in_threadpool(get_wallet_for_user, user["id"]),
+    )
+    assets = await run_in_threadpool(
+        build_demo_asset_snapshot,
+        user["id"],
+        wallet=wallet,
+        portfolio=portfolio,
     )
     next_cursor = rows[-1].get("created_at") if len(rows) == limit and sort_by == "created_at" else None
     return {
         "count": len(rows),
         "data": rows,
-        "portfolio": portfolio,
+        **assets,
         "next_cursor": next_cursor,
         "has_next": bool(next_cursor),
     }
@@ -166,6 +180,14 @@ async def terminal_snapshot(
         )
 
     risk = calculate_risk_score(latest)
+    assets = await run_in_threadpool(
+        build_demo_asset_snapshot,
+        user["id"],
+        wallet=wallet,
+        portfolio=portfolio,
+        latest=latest,
+        p2p_rows=p2p_rows,
+    )
     latest_buy = next((row for row in p2p_rows if str(row.get("trade_type", "")).upper() == "BUY"), None)
     latest_sell = next((row for row in p2p_rows if str(row.get("trade_type", "")).upper() == "SELL"), None)
 
@@ -186,8 +208,7 @@ async def terminal_snapshot(
             "data": p2p_rows,
         },
         "risk": risk,
-        "wallet": wallet,
-        "portfolio": portfolio,
+        **assets,
         "trades": {
             "count": len(trades),
             "data": trades,

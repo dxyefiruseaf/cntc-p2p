@@ -7,10 +7,12 @@ import { useAsyncResource } from '../hooks/useAsyncResource';
 import { Badge, Button, Card, DataBadge, Disclaimer, KPICard, RiskMeter, SectionHeader, Skeleton } from '../components/ui';
 import { ErrorState } from '../components/Feedback';
 import TechnicalAnalysisChart from '../components/TechnicalAnalysisChart';
+import AssetPortfolioPanel from '../components/AssetPortfolioPanel';
 import type { MarketRow } from '../types/api';
 
 type NewsItem = { title?: string; source?: string; published_at?: string; summary?: string; link?: string; image?: string; tags?: string[] };
 type DashboardRange = 24 | 168 | 720;
+type AssetResponse = { wallet?: Record<string, unknown>; portfolio?: Record<string, unknown>; valuation?: Record<string, unknown> };
 
 const RANGE_OPTIONS: Array<{ value: DashboardRange; label: string; short: string }> = [
   { value: 24, label: '24 giờ', short: '24H' },
@@ -60,6 +62,10 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const market = useMarket();
   const [rangeHours, setRangeHours] = useState<DashboardRange>(168);
+  const assets = useAsyncResource(
+    signal => apiRequest<AssetResponse>('/api/wallet/me', { signal, timeout: 18_000, cacheTtl: 5_000 }),
+    [],
+  );
   const news = useAsyncResource(
     signal => apiRequest<{ data?: NewsItem[] }>('/api/news/latest?limit=6', { signal, timeout: 20_000 }),
     [],
@@ -184,6 +190,15 @@ export default function Dashboard() {
         <KPICard label="P2P Spread" value={formatPercent(spread)} sub={buy?.p2p_price ? `Mua ${formatVND(buy.p2p_price)}` : 'Chưa có dữ liệu'} icon="↔" accent="#14B8A6" delay={240} />
         <KPICard label="Rủi ro" value={<div className="flex items-center gap-2"><span>{Math.round(risk)}</span><Badge variant={risk < 30 ? 'success' : risk < 60 ? 'warning' : 'danger'}>{riskLabel}</Badge></div>} sub="Điểm tổng hợp / 100" icon="⚡" accent="#F59E0B" delay={280} />
       </section>
+
+      {assets.loading && !assets.data ? <Skeleton className="mb-5 h-64" /> : <AssetPortfolioPanel
+        className="mb-5"
+        title="Danh mục tài sản của bạn"
+        subtitle="Tiền mặt VNĐ, lượng BTC đang giữ và tổng tài sản mô phỏng được cập nhật từ giao dịch demo."
+        wallet={assets.data?.wallet}
+        portfolio={assets.data?.portfolio}
+        valuation={assets.data?.valuation}
+      />}
 
       <Card className="mb-5 p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">

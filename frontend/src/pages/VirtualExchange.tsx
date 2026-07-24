@@ -5,6 +5,7 @@ import { useToast } from '../context/ToastContext';
 import { Badge, Button, Card, Disclaimer, Input, SectionHeader, Select, Skeleton } from '../components/ui';
 import { ErrorState } from '../components/Feedback';
 import TechnicalAnalysisChart from '../components/TechnicalAnalysisChart';
+import AssetPortfolioPanel from '../components/AssetPortfolioPanel';
 
 type Trade = Record<string, unknown>;
 type Terminal = {
@@ -14,10 +15,11 @@ type Terminal = {
   risk?: Record<string, unknown>;
   wallet?: Record<string, unknown>;
   portfolio?: Record<string, unknown>;
+  valuation?: Record<string, unknown>;
   trades?: { data?: Trade[]; count?: number };
   source?: string;
 };
-type TradeResponse = Trade & { wallet?: Record<string, unknown>; portfolio?: Record<string, unknown> };
+type TradeResponse = Trade & { wallet?: Record<string, unknown>; portfolio?: Record<string, unknown>; valuation?: Record<string, unknown> };
 
 export default function VirtualExchange() {
   const { showToast } = useToast();
@@ -58,7 +60,8 @@ export default function VirtualExchange() {
   const walletBalance = asNumber(data?.wallet?.balance_vnd);
   const position = asNumber(data?.portfolio?.position_btc);
   const enough = side === 'BUY' ? walletBalance >= amountVnd : position >= amountBtc;
-  const equity = walletBalance + position * btcVnd;
+  const btcMarketValue = position * btcVnd;
+  const equity = walletBalance + btcMarketValue;
 
   const switchUnit = () => {
     if (inputUnit === 'VND') {
@@ -115,6 +118,14 @@ export default function VirtualExchange() {
           ...current,
           wallet: result.wallet || fallbackWallet,
           portfolio: result.portfolio || fallbackPortfolio,
+          valuation: result.valuation || {
+            ...current.valuation,
+            cash_vnd: asNumber((result.wallet || fallbackWallet).balance_vnd),
+            position_btc: asNumber((result.portfolio || fallbackPortfolio).position_btc),
+            btc_price_vnd: btcVnd,
+            btc_market_value_vnd: asNumber((result.portfolio || fallbackPortfolio).position_btc) * btcVnd,
+            total_equity_vnd: asNumber((result.wallet || fallbackWallet).balance_vnd) + asNumber((result.portfolio || fallbackPortfolio).position_btc) * btcVnd,
+          },
           trades: {
             ...current.trades,
             count: (current.trades?.count || oldTrades.length) + 1,
@@ -125,7 +136,8 @@ export default function VirtualExchange() {
       setSelectedTrade(createdTrade);
       clearApiCache('/api/demo-trades');
       clearApiCache('/api/wallet');
-      showToast(`Đã khớp lệnh ${side} ${formatNumber(amountBtc, 8)} BTC demo. Số dư đã cập nhật.`, 'success');
+      const holdingAfter = asNumber(result.portfolio?.position_btc, Math.max(0, position + (side === 'BUY' ? amountBtc : -amountBtc)));
+      showToast(`Đã khớp lệnh ${side} ${formatNumber(amountBtc, 8)} BTC demo. Bạn đang nắm giữ ${formatNumber(holdingAfter, 8)} BTC.`, 'success');
       void load(true, true);
     } catch (reason) {
       showToast(reason instanceof Error ? reason.message : 'Không thể đặt lệnh.', 'error');
@@ -144,13 +156,15 @@ export default function VirtualExchange() {
         <Badge variant="warning">Sandbox Only</Badge>
       </div>
 
-      <section className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+      <section className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
         <Metric label="BTC/USDT" value={formatUSD(btcUsd)} />
         <Metric label="1 BTC quy đổi" value={btcVnd ? formatVND(btcVnd) : '—'} />
         <Metric label="P2P BUY / SELL" value={`${buyRate ? formatVND(buyRate) : '—'} / ${sellRate ? formatVND(sellRate) : '—'}`} />
         <Metric label="Risk Score" value={`${Math.round(asNumber(data?.risk?.score))}/100`} />
-        <Metric label="Ví khả dụng" value={formatVND(walletBalance)} />
-        <Metric label="Equity ước tính" value={formatVND(equity)} />
+        <Metric label="Tiền mặt VNĐ" value={formatVND(walletBalance)} />
+        <Metric label="BTC đang nắm giữ" value={`${formatNumber(position, 8)} BTC`} accent />
+        <Metric label="Giá trị BTC" value={formatVND(btcMarketValue)} />
+        <Metric label="Tổng tài sản" value={formatVND(equity)} accent />
       </section>
 
       <section className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,1.55fr)_390px]">
@@ -183,7 +197,14 @@ export default function VirtualExchange() {
             <Button className="mt-4 w-full" loading={executing} disabled={!enough || amountBtc <= 0 || amountVnd <= 0} onClick={() => void execute()}>{side === 'BUY' ? 'Mua BTC demo' : 'Bán BTC demo'}</Button>
           </Card>
 
-          <Card className="p-4"><SectionHeader title="Danh mục sau giao dịch" /><div className="space-y-2"><OrderRow label="BTC đang nắm giữ" value={`${formatNumber(position, 8)} BTC`} /><OrderRow label="Giá vốn bình quân" value={data?.portfolio?.avg_entry_vnd ? formatVND(data.portfolio.avg_entry_vnd) : '—'} /><OrderRow label="Lãi/lỗ đã chốt" value={formatVND(data?.portfolio?.realized_pnl_vnd)} color={asNumber(data?.portfolio?.realized_pnl_vnd) >= 0 ? '#22C55E' : '#EF4444'} /></div></Card>
+          <AssetPortfolioPanel
+            title="Tài sản sau giao dịch"
+            subtitle="Tiền mặt, lượng BTC và tổng tài sản cập nhật ngay sau khi lệnh được khớp."
+            wallet={data?.wallet}
+            portfolio={data?.portfolio}
+            valuation={data?.valuation}
+            btcPriceVnd={btcVnd}
+          />
         </div>
       </section>
 
@@ -212,6 +233,9 @@ function TradeReceipt({ trade, onClose }: { trade: Trade; onClose: () => void })
           <ReceiptRow label="Giá BTC áp dụng" value={formatVND(trade.applied_price)} />
           <ReceiptRow label="Khối lượng" value={`${formatNumber(trade.amount_btc || trade.amount_usdt, 8)} BTC`} />
           <div className="receipt-total"><ReceiptRow label={side === 'BUY' ? 'TỔNG THANH TOÁN' : 'TỔNG THỰC NHẬN'} value={formatVND(trade.amount_vnd)} /></div>
+          {Boolean(trade.wallet) && <ReceiptRow label="Tiền mặt sau lệnh" value={formatVND((trade.wallet as Record<string, unknown>).balance_vnd)} />}
+          {Boolean(trade.portfolio) && <ReceiptRow label="BTC nắm giữ sau lệnh" value={`${formatNumber((trade.portfolio as Record<string, unknown>).position_btc, 8)} BTC`} />}
+          {Boolean(trade.valuation) && <ReceiptRow label="Tổng tài sản sau lệnh" value={formatVND((trade.valuation as Record<string, unknown>).total_equity_vnd)} />}
           <p className="mt-4 text-center text-[10px] leading-relaxed text-[var(--text-dim)]">Biên nhận này chỉ xác nhận giao dịch mô phỏng, không có giá trị thanh toán hoặc kế toán.</p>
           <Button className="mt-4 w-full" variant="secondary" onClick={onClose}>Đóng hóa đơn</Button>
         </div>
@@ -221,6 +245,6 @@ function TradeReceipt({ trade, onClose }: { trade: Trade; onClose: () => void })
 }
 
 function ReceiptRow({ label, value }: { label: string; value: string }) { return <div className="receipt-row"><span>{label}</span><strong>{value}</strong></div>; }
-function Metric({ label, value }: { label: string; value: string }) { return <Card className="p-3"><p className="text-[10px] uppercase tracking-wider text-[var(--text-sec)]">{label}</p><strong className="mt-1 block truncate tabular text-sm">{value}</strong></Card>; }
+function Metric({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) { return <Card className="p-3"><p className="text-[10px] uppercase tracking-wider text-[var(--text-sec)]">{label}</p><strong className={`mt-1 block break-words tabular text-sm ${accent ? 'text-[#F7931A]' : ''}`}>{value}</strong></Card>; }
 function MiniMetric({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-[var(--border-soft)] bg-[var(--elevated)] p-3"><span className="text-[10px] text-[var(--text-sec)]">{label}</span><strong className="mt-1 block tabular text-sm">{value}</strong></div>; }
 function OrderRow({ label, value, color }: { label: string; value: string; color?: string }) { return <div className="flex items-center justify-between gap-3"><span className="text-xs text-[var(--text-sec)]">{label}</span><strong className="tabular text-sm" style={{ color: color || 'var(--text-main)' }}>{value}</strong></div>; }

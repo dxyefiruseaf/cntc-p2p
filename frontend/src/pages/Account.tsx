@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiRequest } from '../lib/api';
-import { formatDateTime, formatVND } from '../lib/format';
+import { formatDateTime } from '../lib/format';
 import { Badge, Button, Card, Disclaimer, Input, SectionHeader, Skeleton, Toggle } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import AssetPortfolioPanel from '../components/AssetPortfolioPanel';
 
-type Wallet = { wallet?: Record<string, unknown> };
+type Wallet = { wallet?: Record<string, unknown>; portfolio?: Record<string, unknown>; valuation?: Record<string, unknown> };
 type Subscription = { active?: boolean; plan_name?: string; expires_at?: string };
 type AIHistory = { data?: Array<Record<string, unknown>> };
 
@@ -83,12 +84,11 @@ export default function Account() {
 
   const profile = auth.profile || {};
   const displayName = String(profile.full_name || name || auth.user?.email?.split('@')[0] || 'Người dùng');
-  const balance = Number(wallet?.wallet?.balance_vnd || 0);
 
   return <div className="page-enter space-y-5">
     <header><Badge variant="info">Account Center</Badge><h1 className="mt-2 text-2xl font-extrabold">Tài khoản của bạn</h1><p className="mt-1 text-sm text-[var(--text-sec)]">Quản lý hồ sơ, phương thức đăng nhập, gói Sandbox và hoạt động gần đây.</p></header>
     {loading ? <div className="grid gap-4 lg:grid-cols-[.7fr_1.3fr]"><Skeleton className="h-96"/><Skeleton className="h-96"/></div> : <section className="grid gap-4 lg:grid-cols-[.72fr_1.28fr]">
-      <div className="space-y-4"><Card className="hero-surface p-6 text-center"><div className="mx-auto flex h-24 w-24 items-center justify-center rounded-3xl bg-[#F7931A]/15 text-4xl font-black text-[#F7931A]">{displayName.slice(0,1).toUpperCase()}</div><h2 className="mt-4 text-xl font-bold">{displayName}</h2><p className="mt-1 text-sm text-[var(--text-sec)]">{auth.user?.email}</p><div className="mt-3 flex justify-center gap-2"><Badge variant={auth.isAdmin ? 'violet' : 'info'}>{auth.isAdmin ? 'Quản trị viên' : 'Người dùng'}</Badge><Badge variant={subscription?.active ? 'gold' : 'neutral'}>{subscription?.plan_name || 'Free'}</Badge></div><div className="mt-6 grid gap-3 text-left sm:grid-cols-2 lg:grid-cols-1"><div className="metric-box"><span>Số dư ví demo</span><strong>{formatVND(balance)}</strong></div><div className="metric-box"><span>Premium hết hạn</span><strong className="text-sm">{subscription?.active ? formatDateTime(subscription.expires_at) : 'Chưa đăng ký'}</strong></div></div></Card><Disclaimer text="Không chia sẻ mật khẩu, mã OTP hoặc khóa truy cập. BTC BigData Platform không yêu cầu chuyển tiền thật qua chat hoặc Email." tone="danger"/></div>
+      <div className="space-y-4"><Card className="hero-surface p-6 text-center"><div className="mx-auto flex h-24 w-24 items-center justify-center rounded-3xl bg-[#F7931A]/15 text-4xl font-black text-[#F7931A]">{displayName.slice(0,1).toUpperCase()}</div><h2 className="mt-4 text-xl font-bold">{displayName}</h2><p className="mt-1 text-sm text-[var(--text-sec)]">{auth.user?.email}</p><div className="mt-3 flex justify-center gap-2"><Badge variant={auth.isAdmin ? 'violet' : 'info'}>{auth.isAdmin ? 'Quản trị viên' : 'Người dùng'}</Badge><Badge variant={subscription?.active ? 'gold' : 'neutral'}>{subscription?.plan_name || 'Free'}</Badge></div><div className="mt-6"><div className="metric-box text-left"><span>Premium hết hạn</span><strong className="text-sm">{subscription?.active ? formatDateTime(subscription.expires_at) : 'Chưa đăng ký'}</strong></div></div></Card><AssetPortfolioPanel title="Tài sản demo của bạn" subtitle="Số dư VNĐ và Bitcoin nắm giữ được đồng bộ từ ví và giao dịch demo." wallet={wallet?.wallet} portfolio={wallet?.portfolio} valuation={wallet?.valuation}/><Disclaimer text="Không chia sẻ mật khẩu, mã OTP hoặc khóa truy cập. BTC BigData Platform không yêu cầu chuyển tiền thật qua chat hoặc Email." tone="danger"/></div>
       <div className="space-y-4"><Card className="p-5"><SectionHeader title="Thông tin cá nhân" sub="Tên hiển thị được lưu trong Supabase Auth."/><div className="grid gap-4 sm:grid-cols-2"><Input label="Họ và tên" value={name} onChange={event => setName(event.target.value)}/><Input label="Email" value={String(auth.user?.email || '')} disabled/></div><Button loading={profileSaving} onClick={saveProfile} className="mt-4">Lưu thay đổi</Button></Card>
       <Card className="p-5"><SectionHeader title="Tạo hoặc đổi mật khẩu" sub="Tài khoản vẫn có thể đăng nhập bằng OTP. Mật khẩu mới dùng cho phương thức đăng nhập bằng mật khẩu."/><div className="grid gap-4 sm:grid-cols-2"><Input label="Mật khẩu mới" type="password" autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} placeholder="Tối thiểu 8 ký tự"/><Input label="Xác nhận mật khẩu" type="password" autoComplete="new-password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} placeholder="Nhập lại mật khẩu" onKeyDown={event => { if (event.key === 'Enter') void changePassword(); }}/></div><p className="mt-3 text-xs text-[var(--text-sec)]">Mật khẩu cần tối thiểu 8 ký tự và nên có cả chữ lẫn số. Sau khi cập nhật, bạn vẫn có thể chọn OTP Email ở màn hình đăng nhập.</p><Button variant="secondary" loading={passwordSaving} onClick={changePassword} className="mt-4">Cập nhật mật khẩu</Button></Card>
       <Card className="p-5"><SectionHeader title="Cài đặt riêng tư"/><div className="flex items-center justify-between gap-4"><div><p className="text-sm font-medium">Nhận Email cảnh báo</p><p className="mt-1 text-xs text-[var(--text-sec)]">Tùy chọn giao diện cục bộ; rule Email được quản lý tại trang Cảnh báo.</p></div><Toggle checked={notifications} onChange={value => { setNotifications(value); localStorage.setItem('btc_email_preferences', value ? 'on' : 'off'); }}/></div></Card>

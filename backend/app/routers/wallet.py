@@ -22,6 +22,7 @@ from app.repositories.market_repository import (
     mark_wallet_topup_failed,
     mark_wallet_topup_success,
 )
+from app.services.asset_service import build_demo_asset_snapshot
 
 router = APIRouter(prefix="/api/wallet", tags=["wallet"])
 
@@ -73,8 +74,12 @@ def _wallet_return_url(request: Request) -> str:
 def wallet_me(request: Request):
     user = get_current_user(request)
     snapshot = get_wallet_snapshot(user["id"], limit=10)
+    assets = build_demo_asset_snapshot(
+        user["id"],
+        wallet=snapshot.get("wallet") or {},
+    )
     return {
-        "wallet": snapshot.get("wallet") or {},
+        **assets,
         "transactions": snapshot.get("transactions") or [],
         "sandbox": True,
         "disclaimer": "Ví điện tử demo phục vụ học phần, không phát sinh tiền thật.",
@@ -89,8 +94,15 @@ def wallet_transactions(
 ):
     user = get_current_user(request)
     rows = list_wallet_transactions(user["id"], limit=limit, before_created_at=before)
+    assets = build_demo_asset_snapshot(user["id"])
     next_cursor = rows[-1].get("created_at") if len(rows) == limit else None
-    return {"count": len(rows), "data": rows, "next_cursor": next_cursor, "has_next": bool(next_cursor)}
+    return {
+        "count": len(rows),
+        "data": rows,
+        "next_cursor": next_cursor,
+        "has_next": bool(next_cursor),
+        **assets,
+    }
 
 
 @router.post("/topup/create")
